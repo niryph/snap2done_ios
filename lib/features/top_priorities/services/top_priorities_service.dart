@@ -1,13 +1,15 @@
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../models/top_priorities_entry_model.dart';
+import '../models/top_priorities_models.dart';
 import '../../../services/auth_service.dart';
+import '../../../services/card_service.dart';
 
 class TopPrioritiesService {
   static final _supabase = Supabase.instance.client;
   static const String _table = 'top_priorities_entries';
 
   // Get entries for a specific date
-  static Future<List<Map<String, dynamic>>> getEntriesForDate(DateTime date) async {
+  static Future<List<Map<String, dynamic>>> getEntriesForDate(DateTime date, {String? cardId}) async {
     final user = AuthService.currentUser;
     if (user == null) throw Exception('User not authenticated');
 
@@ -17,7 +19,7 @@ class TopPrioritiesService {
         .eq('user_id', user.id)
         .eq('date', date.toIso8601String())
         .order('position');
-
+    
     return List<Map<String, dynamic>>.from(response);
   }
 
@@ -73,11 +75,14 @@ class TopPrioritiesService {
   }
 
   // Save multiple priority entries for a date
-  static Future<void> savePriorityEntries(DateTime date, List<Map<String, dynamic>> entries) async {
+  static Future<void> savePriorityEntries(
+    DateTime date, 
+    List<Map<String, dynamic>> entries,
+  ) async {
     final user = AuthService.currentUser;
     if (user == null) throw Exception('User not authenticated');
 
-    // Delete existing entries for this date
+    // Delete existing entries for this date and user
     await _supabase
         .from(_table)
         .delete()
@@ -113,6 +118,23 @@ class TopPrioritiesService {
         .delete()
         .eq('user_id', user.id)
         .eq('date', date.toIso8601String());
+  }
+
+  // Delete entries for a specific card
+  static Future<void> deleteEntriesForCard(String cardId) async {
+    final user = AuthService.currentUser;
+    if (user == null) throw Exception('User not authenticated');
+
+    // Since we don't have card_id column, we'll need to rely on metadata in the card
+    // to find the dates for which we need to delete entries
+    final card = await CardService.getCardById(cardId);
+    if (card?.metadata != null && card!.metadata!['priorities'] != null) {
+      final priorities = card.metadata!['priorities'] as Map<String, dynamic>;
+      for (final dateKey in priorities.keys) {
+        final date = TopPrioritiesModel.keyToDate(dateKey);
+        await deleteEntriesForDate(date);
+      }
+    }
   }
 
   // Get default tasks for a new entry

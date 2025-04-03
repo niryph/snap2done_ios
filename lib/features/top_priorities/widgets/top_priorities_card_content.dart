@@ -151,7 +151,10 @@ class _TopPrioritiesCardContentState extends State<TopPrioritiesCardContent> {
         builder: (context) => TopPrioritiesPage(
           cardId: widget.cardId,
           metadata: widget.metadata,
-          onSave: widget.onMetadataChanged,
+          onSave: (metadata) async {
+            await widget.onMetadataChanged(metadata);
+            return widget.cardId!;
+          },
           isEditing: true,
         ),
       ),

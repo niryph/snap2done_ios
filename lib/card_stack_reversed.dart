@@ -429,6 +429,7 @@ class _CardStackReversedState extends State<CardStackReversed> {
           builder: (context) => TopPrioritiesPage(
             cardId: card.id,
             metadata: card.metadata ?? {},
+            isEditing: true,
             onSave: (updatedMetadata) async {
               try {
                 // Update card metadata in database first
@@ -446,7 +447,7 @@ class _CardStackReversedState extends State<CardStackReversed> {
                     }
                   });
                 }
-                Navigator.pop(context);
+                return card.id; // Return the card ID
               } catch (e) {
                 print('Error updating top priorities metadata: $e');
                 if (mounted) {
@@ -454,6 +455,7 @@ class _CardStackReversedState extends State<CardStackReversed> {
                     SnackBar(content: Text('Error updating top priorities: $e')),
                   );
                 }
+                throw e; // Re-throw to handle in the page
               }
             },
           ),
@@ -1122,16 +1124,19 @@ class _CardStackReversedState extends State<CardStackReversed> {
                   // Update card metadata in database first
                   await CardService.updateCardMetadata(existingCard.id, updatedMetadata);
                   
-                  // Get the updated card and refresh UI
-                  final updatedCard = await CardService.getCardById(existingCard.id);
-                  if (updatedCard != null && mounted) {
+                  // Only update state if the widget is still mounted
+                  if (mounted) {
                     setState(() {
                       final index = cards.indexWhere((c) => c.id == existingCard.id);
                       if (index != -1) {
-                        cards[index] = updatedCard;
+                        cards[index] = CardModel.fromMap({
+                          ...cards[index].toMap(),
+                          'metadata': updatedMetadata,
+                        });
                       }
                     });
                   }
+                  return existingCard.id;
                 } catch (e) {
                   print('Error updating top priorities metadata: $e');
                   if (mounted) {
@@ -1139,6 +1144,7 @@ class _CardStackReversedState extends State<CardStackReversed> {
                       SnackBar(content: Text('Error updating top priorities: $e')),
                     );
                   }
+                  throw e; // Re-throw to handle in the page
                 }
               },
             ),
@@ -1161,7 +1167,11 @@ class _CardStackReversedState extends State<CardStackReversed> {
       };
 
       try {
-        final newCard = await CardService.createCard(cardData);
+        // Create card and add to state in a single operation
+        final newCard = await CardService.createCard(cardData, notifyListeners: false);
+        setState(() {
+          cards.insert(0, newCard);
+        });
         
         // Open the TopPrioritiesPage for the new card
         Navigator.push(
@@ -1176,18 +1186,19 @@ class _CardStackReversedState extends State<CardStackReversed> {
                   // Update card metadata in database first
                   await CardService.updateCardMetadata(newCard.id, updatedMetadata);
                   
-                  // Get the updated card and refresh UI
-                  final updatedCard = await CardService.getCardById(newCard.id);
-                  if (updatedCard != null && mounted) {
+                  // Update local state directly without fetching from database
+                  if (mounted) {
                     setState(() {
                       final index = cards.indexWhere((c) => c.id == newCard.id);
                       if (index != -1) {
-                        cards[index] = updatedCard;
-                      } else {
-                        cards.insert(0, updatedCard);
+                        cards[index] = CardModel.fromMap({
+                          ...cards[index].toMap(),
+                          'metadata': updatedMetadata,
+                        });
                       }
                     });
                   }
+                  return newCard.id;
                 } catch (e) {
                   print('Error updating top priorities metadata: $e');
                   if (mounted) {
@@ -1195,6 +1206,7 @@ class _CardStackReversedState extends State<CardStackReversed> {
                       SnackBar(content: Text('Error updating top priorities: $e')),
                     );
                   }
+                  throw e; // Re-throw to handle in the page
                 }
               },
             ),

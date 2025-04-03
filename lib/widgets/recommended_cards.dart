@@ -9,8 +9,10 @@ import '../features/mood_gratitude/pages/mood_gratitude_setup_page.dart';
 import '../features/calorie_tracker/pages/calorie_tracker_setup_page.dart';
 import '../features/expense_tracker/pages/expense_tracker_setup_page.dart';
 import '../features/top_priorities/pages/top_priorities_page.dart';
+import '../features/top_priorities/models/top_priorities_models.dart';
 import '../services/auth_service.dart';
 import 'package:uuid/uuid.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 class RecommendedCards extends StatefulWidget {
   final Function(CardModel) onCardSelected;
@@ -41,34 +43,20 @@ class _RecommendedCardsState extends State<RecommendedCards> {
     super.dispose();
   }
 
-  void _handleCardSelection(BuildContext context, CardModel template) async {
-    print("_handleCardSelection called for template: ${template.id}");
-    
-    // Get the current user's ID
-    final user = AuthService.currentUser;
-    if (user == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please sign in to create cards')),
-      );
-      return;
-    }
-
-    if (template.id == 'template_water') {
-      // For water intake template, pass it directly to the onCardSelected handler
-      // The CardStackReversed class will check if a water intake card already exists
-      widget.onCardSelected(template);
-      return;
-    }
-    
-    if (template.id == 'template_priorities') {
-      // Check for existing top priorities card
+  Future<void> _handleTemplateSelection(String templateId) async {
+    if (templateId == 'template_priorities') {
+      // Check for existing top priority cards
       final existingCards = await CardService.getCards();
       final existingTopPriorityCards = existingCards.where((card) => 
-        card.metadata?['type'] == 'top_priorities').toList();
+        card.metadata != null && 
+        card.metadata!['type'] == 'top_priorities' &&
+        card.metadata!['priorities'] != null).toList();
 
       if (existingTopPriorityCards.isNotEmpty) {
         // Open existing card
         final existingCard = existingTopPriorityCards.first;
+        if (!mounted) return;
+        
         Navigator.push(
           context,
           MaterialPageRoute(
@@ -77,38 +65,130 @@ class _RecommendedCardsState extends State<RecommendedCards> {
               metadata: existingCard.metadata ?? {},
               isEditing: true,
               onSave: (updatedMetadata) async {
-                try {
-                  // Update card metadata in database first
-                  await CardService.updateCardMetadata(existingCard.id, updatedMetadata);
-                  
-                  // Get the updated card
-                  final updatedCard = await CardService.getCardById(existingCard.id);
-                  if (updatedCard != null) {
-                    widget.onCardSelected(updatedCard);
-                  }
-                } catch (e) {
-                  print('Error updating top priorities metadata: $e');
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text('Error updating top priorities: $e')),
-                  );
-                }
+                await CardService.updateCardMetadata(existingCard.id, updatedMetadata);
+                return existingCard.id;
               },
             ),
           ),
         );
+        return; // Exit early to prevent card creation
+      }
+
+      // Only proceed with creation if no existing card was found
+      final userId = Supabase.instance.client.auth.currentUser?.id;
+      if (userId == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Please log in to create cards')),
+        );
         return;
       }
-      
-      // If no existing card, pass to CardStackReversed to create new one
-      widget.onCardSelected(template);
+
+      if (!mounted) return;
+
+      // Navigate to TopPrioritiesPage in creation mode
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (context) => TopPrioritiesPage(
+            isEditing: false,
+            onSave: (metadata) async {
+              try {
+                // Create the card with initial metadata
+                final cardData = {
+                  'title': 'Daily Top 3 Priorities',
+                  'type': 'top_priorities',
+                  'metadata': metadata,
+                  'description': 'Focus on your most important tasks',
+                  'color': '0xFFE53935',
+                  'tags': ['Productivity'],
+                  'user_id': userId,
+                  'created_at': DateTime.now().toIso8601String(),
+                  'updated_at': DateTime.now().toIso8601String(),
+                };
+                
+                final newCard = await CardService.createCard(cardData);
+                return newCard.id;
+              } catch (e) {
+                print('Error creating top priorities card: $e');
+                throw e; // Re-throw to be handled by the page
+              }
+            },
+          ),
+        ),
+      );
       return;
     }
 
-    if (template.id == 'template_mood') {
+    if (templateId == 'template_water') {
+      // For water intake template, pass it directly to the onCardSelected handler
+      // The CardStackReversed class will check if a water intake card already exists
+      widget.onCardSelected(CardModel(
+        id: templateId,
+        userId: _uuid.v4(),
+        title: 'Hydration Tracker',
+        description: 'Track daily water consumption',
+        color: '0xFF00BCD4', // Cyan
+        tags: ['Health', 'Habits'],
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+        tasks: [
+          TaskModel(
+            id: _uuid.v4(),
+            cardId: 'template_water',
+            description: 'Morning (2 glasses)',
+            priority: 'high',
+          ),
+          TaskModel(
+            id: _uuid.v4(),
+            cardId: 'template_water',
+            description: 'Afternoon (3 glasses)',
+            priority: 'high',
+          ),
+          TaskModel(
+            id: _uuid.v4(),
+            cardId: 'template_water',
+            description: 'Evening (3 glasses)',
+            priority: 'high',
+          ),
+        ],
+      ));
+      return;
+    }
+    
+    if (templateId == 'template_mood') {
       // For mood & gratitude template, show setup page first
-      final cardData = template.toMap();
+      final cardData = CardModel(
+        id: templateId,
+        userId: 'template',
+        title: 'Mood & Gratitude Log',
+        description: 'Track mood and practice gratitude',
+        color: '0xFF9C27B0', // Purple
+        tags: ['Wellness', 'Mental Health'],
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+        tasks: [
+          TaskModel(
+            id: _uuid.v4(),
+            cardId: 'template_mood',
+            description: 'Morning mood check-in',
+            priority: 'high',
+          ),
+          TaskModel(
+            id: _uuid.v4(),
+            cardId: 'template_mood',
+            description: 'Evening mood check-in',
+            priority: 'high',
+          ),
+          TaskModel(
+            id: _uuid.v4(),
+            cardId: 'template_mood',
+            description: 'List 3 things you\'re grateful for',
+            priority: 'high',
+          ),
+        ],
+      ).toMap();
       cardData['id'] = _uuid.v4();
-      cardData['user_id'] = user.id;
+      cardData['user_id'] = AuthService.currentUser?.id;
       
       // Update timestamps
       final now = DateTime.now();
@@ -139,25 +219,98 @@ class _RecommendedCardsState extends State<RecommendedCards> {
       return;
     }
     
-    if (template.id == 'template_calorie') {
+    if (templateId == 'template_calorie') {
       // For calorie tracker template, we'll let CardStackReversed handle it
       // since it needs to check if a card already exists and handle the setup page
-      widget.onCardSelected(template);
+      widget.onCardSelected(CardModel(
+        id: templateId,
+        userId: _uuid.v4(),
+        title: 'Calorie & Nutrition Tracker',
+        description: 'Track your daily food intake and macronutrients',
+        color: '0xFFF9A825', // Orange
+        tags: ['Health', 'Nutrition'],
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+        tasks: [
+          TaskModel(
+            id: _uuid.v4(),
+            cardId: 'template_calorie',
+            description: 'Log breakfast',
+            priority: 'high',
+          ),
+          TaskModel(
+            id: _uuid.v4(),
+            cardId: 'template_calorie',
+            description: 'Log lunch',
+            priority: 'high',
+          ),
+          TaskModel(
+            id: _uuid.v4(),
+            cardId: 'template_calorie',
+            description: 'Log dinner',
+            priority: 'high',
+          ),
+        ],
+      ));
       return;
     }
     
-    if (template.id == 'template_expense') {
+    if (templateId == 'template_expense') {
       print("Handling expense tracker template selection");
       // For expense tracker template, we'll pass it directly to the onCardSelected handler
       // The CardStackReversed class will handle checking for existing cards and navigation
-      widget.onCardSelected(template);
+      widget.onCardSelected(CardModel(
+        id: templateId,
+        userId: _uuid.v4(),
+        title: 'Daily Expense Tracker',
+        description: 'Track your daily spending and budget',
+        color: '0xFF2E7D32', // Dark Green
+        tags: ['Finance', 'Budget'],
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+        tasks: [
+          TaskModel(
+            id: _uuid.v4(),
+            cardId: 'template_expense',
+            description: 'Log essential expenses',
+            priority: 'high',
+          ),
+          TaskModel(
+            id: _uuid.v4(),
+            cardId: 'template_expense',
+            description: 'Log discretionary spending',
+            priority: 'medium',
+          ),
+          TaskModel(
+            id: _uuid.v4(),
+            cardId: 'template_expense',
+            description: 'Review daily spending',
+            priority: 'low',
+          ),
+        ],
+      ));
       return;
     }
     
     // For other cards, create immediately
-    final cardData = template.toMap();
-    cardData['id'] = _uuid.v4();
-    cardData['user_id'] = user.id;
+    final cardData = CardModel(
+      id: templateId,
+      userId: _uuid.v4(),
+      title: 'New Card',
+      description: 'Description for new card',
+      color: '0xFF000000', // Default color
+      tags: [],
+      createdAt: DateTime.now(),
+      updatedAt: DateTime.now(),
+      tasks: [
+        TaskModel(
+          id: _uuid.v4(),
+          cardId: templateId,
+          description: 'New task',
+          priority: 'medium',
+        ),
+      ],
+    ).toMap();
     
     // Update timestamps
     final now = DateTime.now();
@@ -167,8 +320,8 @@ class _RecommendedCardsState extends State<RecommendedCards> {
     // Update tasks with new IDs and card ID
     if (cardData['tasks'] != null) {
       final List<Map<String, dynamic>> updatedTasks = [];
-      for (var task in template.tasks) {
-        final taskMap = task.toMap();
+      for (var task in cardData['tasks'] as List) {
+        final taskMap = task as Map<String, dynamic>;
         taskMap['id'] = _uuid.v4();
         taskMap['card_id'] = cardData['id'];
         updatedTasks.add(taskMap);
@@ -187,29 +340,6 @@ class _RecommendedCardsState extends State<RecommendedCards> {
     }
   }
 
-  TaskModel _createTask(String description, {
-    String? id,
-    String? cardId,
-    String? notes,
-    String priority = 'medium',
-    bool isCompleted = false,
-    int position = 0,
-    DateTime? reminderDate,
-    Map<String, dynamic>? metadata,
-  }) {
-    return TaskModel(
-      id: id ?? const Uuid().v4(),
-      cardId: cardId ?? const Uuid().v4(),
-      description: description,
-      notes: notes,
-      priority: priority,
-      isCompleted: isCompleted,
-      position: position,
-      reminderDate: reminderDate,
-      metadata: metadata,
-    );
-  }
-
   // Pre-defined card templates
   List<CardModel> get _templates {
     final templateUserId = _uuid.v4(); // Generate a UUID for templates
@@ -224,9 +354,24 @@ class _RecommendedCardsState extends State<RecommendedCards> {
         createdAt: DateTime.now(),
         updatedAt: DateTime.now(),
         tasks: [
-          _createTask('Morning (2 glasses)', cardId: 'template_water', priority: 'high'),
-          _createTask('Afternoon (3 glasses)', cardId: 'template_water', priority: 'high'),
-          _createTask('Evening (3 glasses)', cardId: 'template_water', priority: 'high'),
+          TaskModel(
+            id: _uuid.v4(),
+            cardId: 'template_water',
+            description: 'Morning (2 glasses)',
+            priority: 'high',
+          ),
+          TaskModel(
+            id: _uuid.v4(),
+            cardId: 'template_water',
+            description: 'Afternoon (3 glasses)',
+            priority: 'high',
+          ),
+          TaskModel(
+            id: _uuid.v4(),
+            cardId: 'template_water',
+            description: 'Evening (3 glasses)',
+            priority: 'high',
+          ),
         ],
       ),
       CardModel(
@@ -239,9 +384,24 @@ class _RecommendedCardsState extends State<RecommendedCards> {
         createdAt: DateTime.now(),
         updatedAt: DateTime.now(),
         tasks: [
-          _createTask('Priority #1', cardId: 'template_priorities', priority: 'high'),
-          _createTask('Priority #2', cardId: 'template_priorities', priority: 'high'),
-          _createTask('Priority #3', cardId: 'template_priorities', priority: 'high'),
+          TaskModel(
+            id: _uuid.v4(),
+            cardId: 'template_priorities',
+            description: 'Priority #1',
+            priority: 'high',
+          ),
+          TaskModel(
+            id: _uuid.v4(),
+            cardId: 'template_priorities',
+            description: 'Priority #2',
+            priority: 'high',
+          ),
+          TaskModel(
+            id: _uuid.v4(),
+            cardId: 'template_priorities',
+            description: 'Priority #3',
+            priority: 'high',
+          ),
         ],
       ),
       CardModel(
@@ -254,9 +414,24 @@ class _RecommendedCardsState extends State<RecommendedCards> {
         createdAt: DateTime.now(),
         updatedAt: DateTime.now(),
         tasks: [
-          _createTask('Morning mood check-in', cardId: 'template_mood', priority: 'high'),
-          _createTask('Evening mood check-in', cardId: 'template_mood', priority: 'high'),
-          _createTask('List 3 things you\'re grateful for', cardId: 'template_mood', priority: 'high'),
+          TaskModel(
+            id: _uuid.v4(),
+            cardId: 'template_mood',
+            description: 'Morning mood check-in',
+            priority: 'high',
+          ),
+          TaskModel(
+            id: _uuid.v4(),
+            cardId: 'template_mood',
+            description: 'Evening mood check-in',
+            priority: 'high',
+          ),
+          TaskModel(
+            id: _uuid.v4(),
+            cardId: 'template_mood',
+            description: 'List 3 things you\'re grateful for',
+            priority: 'high',
+          ),
         ],
       ),
       CardModel(
@@ -269,9 +444,24 @@ class _RecommendedCardsState extends State<RecommendedCards> {
         createdAt: DateTime.now(),
         updatedAt: DateTime.now(),
         tasks: [
-          _createTask('Log breakfast', cardId: 'template_calorie', priority: 'high'),
-          _createTask('Log lunch', cardId: 'template_calorie', priority: 'high'),
-          _createTask('Log dinner', cardId: 'template_calorie', priority: 'high'),
+          TaskModel(
+            id: _uuid.v4(),
+            cardId: 'template_calorie',
+            description: 'Log breakfast',
+            priority: 'high',
+          ),
+          TaskModel(
+            id: _uuid.v4(),
+            cardId: 'template_calorie',
+            description: 'Log lunch',
+            priority: 'high',
+          ),
+          TaskModel(
+            id: _uuid.v4(),
+            cardId: 'template_calorie',
+            description: 'Log dinner',
+            priority: 'high',
+          ),
         ],
       ),
       CardModel(
@@ -284,9 +474,24 @@ class _RecommendedCardsState extends State<RecommendedCards> {
         createdAt: DateTime.now(),
         updatedAt: DateTime.now(),
         tasks: [
-          _createTask('Log essential expenses', cardId: 'template_expense', priority: 'high'),
-          _createTask('Log discretionary spending', cardId: 'template_expense', priority: 'medium'),
-          _createTask('Review daily spending', cardId: 'template_expense', priority: 'low'),
+          TaskModel(
+            id: _uuid.v4(),
+            cardId: 'template_expense',
+            description: 'Log essential expenses',
+            priority: 'high',
+          ),
+          TaskModel(
+            id: _uuid.v4(),
+            cardId: 'template_expense',
+            description: 'Log discretionary spending',
+            priority: 'medium',
+          ),
+          TaskModel(
+            id: _uuid.v4(),
+            cardId: 'template_expense',
+            description: 'Review daily spending',
+            priority: 'low',
+          ),
         ],
       ),
       CardModel(
@@ -299,9 +504,24 @@ class _RecommendedCardsState extends State<RecommendedCards> {
         createdAt: DateTime.now(),
         updatedAt: DateTime.now(),
         tasks: [
-          _createTask('Morning block (8-11 AM)', cardId: 'template_timeblock', priority: 'high'),
-          _createTask('Afternoon block (1-4 PM)', cardId: 'template_timeblock', priority: 'high'),
-          _createTask('Evening block (4-6 PM)', cardId: 'template_timeblock', priority: 'medium'),
+          TaskModel(
+            id: _uuid.v4(),
+            cardId: 'template_timeblock',
+            description: 'Morning block (8-11 AM)',
+            priority: 'high',
+          ),
+          TaskModel(
+            id: _uuid.v4(),
+            cardId: 'template_timeblock',
+            description: 'Afternoon block (1-4 PM)',
+            priority: 'high',
+          ),
+          TaskModel(
+            id: _uuid.v4(),
+            cardId: 'template_timeblock',
+            description: 'Evening block (4-6 PM)',
+            priority: 'medium',
+          ),
         ],
       ),
       CardModel(
@@ -314,9 +534,24 @@ class _RecommendedCardsState extends State<RecommendedCards> {
         createdAt: DateTime.now(),
         updatedAt: DateTime.now(),
         tasks: [
-          _createTask('Record bedtime', cardId: 'template_sleep', priority: 'high'),
-          _createTask('Record wake time', cardId: 'template_sleep', priority: 'high'),
-          _createTask('Rate sleep quality (1-10)', cardId: 'template_sleep', priority: 'medium'),
+          TaskModel(
+            id: _uuid.v4(),
+            cardId: 'template_sleep',
+            description: 'Record bedtime',
+            priority: 'high',
+          ),
+          TaskModel(
+            id: _uuid.v4(),
+            cardId: 'template_sleep',
+            description: 'Record wake time',
+            priority: 'high',
+          ),
+          TaskModel(
+            id: _uuid.v4(),
+            cardId: 'template_sleep',
+            description: 'Rate sleep quality (1-10)',
+            priority: 'medium',
+          ),
         ],
       ),
       CardModel(
@@ -329,9 +564,24 @@ class _RecommendedCardsState extends State<RecommendedCards> {
         createdAt: DateTime.now(),
         updatedAt: DateTime.now(),
         tasks: [
-          _createTask('Warm-up (10 mins)', cardId: 'template_workout', priority: 'high'),
-          _createTask('Main workout', cardId: 'template_workout', priority: 'high'),
-          _createTask('Cool-down (10 mins)', cardId: 'template_workout', priority: 'medium'),
+          TaskModel(
+            id: _uuid.v4(),
+            cardId: 'template_workout',
+            description: 'Warm-up (10 mins)',
+            priority: 'high',
+          ),
+          TaskModel(
+            id: _uuid.v4(),
+            cardId: 'template_workout',
+            description: 'Main workout',
+            priority: 'high',
+          ),
+          TaskModel(
+            id: _uuid.v4(),
+            cardId: 'template_workout',
+            description: 'Cool-down (10 mins)',
+            priority: 'medium',
+          ),
         ],
       ),
       CardModel(
@@ -344,9 +594,24 @@ class _RecommendedCardsState extends State<RecommendedCards> {
         createdAt: DateTime.now(),
         updatedAt: DateTime.now(),
         tasks: [
-          _createTask('Morning chores', cardId: 'template_chores', priority: 'high'),
-          _createTask('Evening chores', cardId: 'template_chores', priority: 'high'),
-          _createTask('Weekly tasks', cardId: 'template_chores', priority: 'medium'),
+          TaskModel(
+            id: _uuid.v4(),
+            cardId: 'template_chores',
+            description: 'Morning chores',
+            priority: 'high',
+          ),
+          TaskModel(
+            id: _uuid.v4(),
+            cardId: 'template_chores',
+            description: 'Evening chores',
+            priority: 'high',
+          ),
+          TaskModel(
+            id: _uuid.v4(),
+            cardId: 'template_chores',
+            description: 'Weekly tasks',
+            priority: 'medium',
+          ),
         ],
       ),
       CardModel(
@@ -359,9 +624,24 @@ class _RecommendedCardsState extends State<RecommendedCards> {
         createdAt: DateTime.now(),
         updatedAt: DateTime.now(),
         tasks: [
-          _createTask('Digital sunset (1hr before bed)', cardId: 'template_evening', priority: 'high'),
-          _createTask('Relaxation routine', cardId: 'template_evening', priority: 'high'),
-          _createTask('Prepare for tomorrow', cardId: 'template_evening', priority: 'medium'),
+          TaskModel(
+            id: _uuid.v4(),
+            cardId: 'template_evening',
+            description: 'Digital sunset (1hr before bed)',
+            priority: 'high',
+          ),
+          TaskModel(
+            id: _uuid.v4(),
+            cardId: 'template_evening',
+            description: 'Relaxation routine',
+            priority: 'high',
+          ),
+          TaskModel(
+            id: _uuid.v4(),
+            cardId: 'template_evening',
+            description: 'Prepare for tomorrow',
+            priority: 'medium',
+          ),
         ],
       ),
     ];
@@ -424,7 +704,7 @@ class _RecommendedCardsState extends State<RecommendedCards> {
                       button: true,
                       label: 'Select ${template.title} template',
                       child: GestureDetector(
-                        onTap: () => _handleCardSelection(context, template),
+                        onTap: () => _handleTemplateSelection(template.id),
                         child: Container(
                           decoration: BoxDecoration(
                             color: template.getColor().withOpacity(1.0),

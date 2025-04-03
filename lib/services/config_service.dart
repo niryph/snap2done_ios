@@ -75,7 +75,7 @@ class ConfigService {
     // Define fallback values for critical configurations
     switch (key) {
       case 'GOOGLE_CLOUD_API_KEY':
-        fallbackValue = 'AIzaSyDJfwYYhvXRnBvSJNJLJYnmHQeL9N0yLnI'; // Example key, replace with your actual fallback
+        fallbackValue = 'fall-back-api-key'; // Example key, replace with your actual fallback
         break;
       case 'OPENAI_API_KEY':
         fallbackValue = 'sk-dummy-key-for-development'; // Replace with your actual fallback

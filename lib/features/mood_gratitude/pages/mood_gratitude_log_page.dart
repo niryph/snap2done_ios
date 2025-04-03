@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import '../models/mood_gratitude_models.dart';
 import '../widgets/mood_gratitude_card.dart';
-import '../widgets/mood_calendar_view.dart';
 import '../widgets/mood_analytics_graph.dart';
 import '../../../services/mood_gratitude_service.dart';
 
@@ -24,7 +23,7 @@ class MoodGratitudeLogPage extends StatefulWidget {
 class _MoodGratitudeLogPageState extends State<MoodGratitudeLogPage> {
   late List<MoodEntry> _entries;
   bool _isLoading = true;
-  DateTime? _selectedDay;
+  DateTime _selectedDay = DateTime.now();
   String _selectedTimeRange = 'week';
 
   @override
@@ -82,10 +81,64 @@ class _MoodGratitudeLogPageState extends State<MoodGratitudeLogPage> {
     }
   }
 
-  void _onDaySelected(DateTime day) {
+  void _onDateChanged(DateTime day) {
     setState(() {
       _selectedDay = day;
     });
+  }
+
+  Widget _buildDateNavigation() {
+    return Card(
+      margin: const EdgeInsets.all(8.0),
+      child: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            IconButton(
+              icon: const Icon(Icons.chevron_left),
+              onPressed: () {
+                _onDateChanged(_selectedDay.subtract(const Duration(days: 1)));
+              },
+            ),
+            GestureDetector(
+              onTap: () async {
+                final DateTime? picked = await showDatePicker(
+                  context: context,
+                  initialDate: _selectedDay,
+                  firstDate: DateTime(2020),
+                  lastDate: DateTime.now(),
+                );
+                if (picked != null) {
+                  _onDateChanged(picked);
+                }
+              },
+              child: Row(
+                children: [
+                  Text(
+                    '${_selectedDay.year}-${_selectedDay.month.toString().padLeft(2, '0')}-${_selectedDay.day.toString().padLeft(2, '0')}',
+                    style: const TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  const Icon(Icons.calendar_today, size: 20),
+                ],
+              ),
+            ),
+            IconButton(
+              icon: const Icon(Icons.chevron_right),
+              onPressed: _selectedDay.isBefore(DateTime.now()) 
+                ? () {
+                    _onDateChanged(_selectedDay.add(const Duration(days: 1)));
+                  }
+                : null,
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   @override
@@ -121,12 +174,8 @@ class _MoodGratitudeLogPageState extends State<MoodGratitudeLogPage> {
               onRefresh: _loadEntries,
               child: ListView(
                 children: [
-                  // Calendar View
-                  MoodCalendarView(
-                    entries: _entries,
-                    onDaySelected: _onDaySelected,
-                    selectedDay: _selectedDay,
-                  ),
+                  // Date Navigation
+                  _buildDateNavigation(),
                   
                   // Time Range Selector for Analytics
                   Padding(
@@ -153,29 +202,18 @@ class _MoodGratitudeLogPageState extends State<MoodGratitudeLogPage> {
                   ),
                   
                   // Selected Day's Entry or Recent Entries
-                  if (_selectedDay != null) ...[
-                    Padding(
-                      padding: const EdgeInsets.all(16.0),
-                      child: Text(
-                        'Entry for ${_selectedDay!.year}-${_selectedDay!.month.toString().padLeft(2, '0')}-${_selectedDay!.day.toString().padLeft(2, '0')}',
-                        style: Theme.of(context).textTheme.titleMedium,
-                      ),
+                  Padding(
+                    padding: const EdgeInsets.all(16.0),
+                    child: Text(
+                      'Entries for ${_selectedDay.year}-${_selectedDay.month.toString().padLeft(2, '0')}-${_selectedDay.day.toString().padLeft(2, '0')}',
+                      style: Theme.of(context).textTheme.titleMedium,
                     ),
-                    ..._entries
-                        .where((entry) => entry.dateString == 
-                            '${_selectedDay!.year}-${_selectedDay!.month.toString().padLeft(2, '0')}-${_selectedDay!.day.toString().padLeft(2, '0')}')
-                        .map(_buildEntryCard)
-                        .toList(),
-                  ] else ...[
-                    Padding(
-                      padding: const EdgeInsets.all(16.0),
-                      child: Text(
-                        'Recent Entries',
-                        style: Theme.of(context).textTheme.titleMedium,
-                      ),
-                    ),
-                    ..._entries.take(5).map(_buildEntryCard).toList(),
-                  ],
+                  ),
+                  ..._entries
+                      .where((entry) => entry.dateString == 
+                          '${_selectedDay.year}-${_selectedDay.month.toString().padLeft(2, '0')}-${_selectedDay.day.toString().padLeft(2, '0')}')
+                      .map(_buildEntryCard)
+                      .toList(),
                 ],
               ),
             ),

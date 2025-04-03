@@ -11,6 +11,19 @@ class TopPrioritiesModel {
     return '${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}';
   }
 
+  /// Converts a date key back to a DateTime object
+  static DateTime keyToDate(String key) {
+    final parts = key.split('-');
+    if (parts.length != 3) {
+      throw FormatException('Invalid date key format: $key');
+    }
+    return DateTime(
+      int.parse(parts[0]),  // year
+      int.parse(parts[1]),  // month
+      int.parse(parts[2]),  // day
+    );
+  }
+
   /// Formats a date for display in the UI
   static String formatDate(DateTime date) {
     final now = DateTime.now();
@@ -56,13 +69,14 @@ class TopPrioritiesModel {
     return List.generate(3, (index) {
       return {
         'id': _uuid.v4(),
-        'description': '',
+        'description': 'Priority #${index + 1}',
         'notes': '',
         'isCompleted': false,
         'position': index,
         'metadata': {
           'type': 'top_priority',
           'order': index + 1,
+          'placeholder': true,
         },
       };
     });
