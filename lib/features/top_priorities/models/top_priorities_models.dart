@@ -1,10 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:uuid/uuid.dart';
 import '../../../models/task_model.dart';
+import 'package:intl/intl.dart';
 
 /// Model class for top priorities feature
 class TopPrioritiesModel {
   static final _uuid = Uuid();
+  static const int maxDescriptionLength = 100;
+  static const int maxNoteLength = 200;
 
   /// Converts a date to a string key for storage
   static String dateToKey(DateTime date) {
@@ -25,27 +28,31 @@ class TopPrioritiesModel {
   }
 
   /// Formats a date for display in the UI
-  static String formatDate(DateTime date) {
+  static String formatDate(DateTime date, BuildContext? context) {
     final now = DateTime.now();
-    if (date.year == now.year && date.month == now.month && date.day == now.day) {
+    final today = DateTime(now.year, now.month, now.day);
+    final dateToCheck = DateTime(date.year, date.month, date.day);
+    
+    // For Today, Yesterday, Tomorrow, use simple text
+    if (dateToCheck == today) {
       return 'Today';
     }
-    final yesterday = now.subtract(Duration(days: 1));
-    if (date.year == yesterday.year && date.month == yesterday.month && date.day == yesterday.day) {
+    if (dateToCheck == today.subtract(Duration(days: 1))) {
       return 'Yesterday';
     }
-    final tomorrow = now.add(Duration(days: 1));
-    if (date.year == tomorrow.year && date.month == tomorrow.month && date.day == tomorrow.day) {
+    if (dateToCheck == today.add(Duration(days: 1))) {
       return 'Tomorrow';
     }
     
-    final months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-    return '${months[date.month - 1]} ${date.day}, ${date.year}';
+    // For other dates, use the device's locale settings
+    final locale = context != null ? Localizations.localeOf(context).toString() : 'en_US';
+    final formatter = DateFormat.yMMMd(locale);
+    return formatter.format(date);
   }
 
   /// Gets the title for a specific date
-  static String getTitleForDate(DateTime date) {
-    return 'Top 3 Priorities for ${formatDate(date)}';
+  static String getTitleForDate(DateTime date, BuildContext context) {
+    return 'Top 3 Priorities for ${formatDate(date, context)}';
   }
 
   /// Creates default metadata for a new top priorities card
@@ -66,20 +73,7 @@ class TopPrioritiesModel {
 
   /// Gets default tasks for a new day
   static List<Map<String, dynamic>> getDefaultTasks() {
-    return List.generate(3, (index) {
-      return {
-        'id': _uuid.v4(),
-        'description': 'Priority #${index + 1}',
-        'notes': '',
-        'isCompleted': false,
-        'position': index,
-        'metadata': {
-          'type': 'top_priority',
-          'order': index + 1,
-          'placeholder': true,
-        },
-      };
-    });
+    return List.generate(3, (index) => createDefaultTask(index));
   }
 
   /// Converts a task to TaskModel format
@@ -125,5 +119,24 @@ class TopPrioritiesModel {
       default:
         return Icons.remove;
     }
+  }
+
+  static bool isValidDescription(String description) {
+    return description.length <= maxDescriptionLength;
+  }
+
+  static Map<String, dynamic> createDefaultTask(int index) {
+    return {
+      'id': _uuid.v4(),
+      'description': '',
+      'notes': <String>[],
+      'isCompleted': false,
+      'position': index,
+      'metadata': {
+        'type': 'top_priority',
+        'order': index + 1,
+        'placeholder': true,
+      },
+    };
   }
 } 

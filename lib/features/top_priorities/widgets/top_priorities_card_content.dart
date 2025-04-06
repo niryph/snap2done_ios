@@ -229,7 +229,7 @@ class _TopPrioritiesCardContentState extends State<TopPrioritiesCardContent> {
               GestureDetector(
                 onTap: _editPriorities,
                 child: Text(
-                  TopPrioritiesModel.formatDate(_selectedDate),
+                  TopPrioritiesModel.formatDate(_selectedDate, context),
                   style: TextStyle(
                     fontSize: 16,
                     fontWeight: FontWeight.bold,
