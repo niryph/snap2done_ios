@@ -24,6 +24,7 @@ import 'screens/reset_password_screen.dart';
 import 'package:flutter/services.dart' as services;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter/services.dart';
+import 'services/storage_service.dart';
 
 // Global navigator key for accessing navigator context from anywhere
 final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
@@ -50,6 +51,10 @@ void main() async {
     // Initialize configuration services
     await ConfigService.initialize();
     debugPrint('[TRACE] INIT: ConfigService initialized');
+    
+    // Initialize storage service
+    await StorageService.initialize();
+    debugPrint('[TRACE] INIT: StorageService initialized');
     
     // Set up deep link handling for initial link
     final appLinks = AppLinks();

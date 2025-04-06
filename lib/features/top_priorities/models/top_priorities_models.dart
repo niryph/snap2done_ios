@@ -8,6 +8,18 @@ class TopPrioritiesModel {
   static final _uuid = Uuid();
   static const int maxDescriptionLength = 100;
   static const int maxNoteLength = 200;
+  static const int maxDocumentNameLength = 100;
+  
+  static const List<String> supportedDocumentTypes = [
+    'image/jpeg',
+    'image/png',
+    'image/gif',
+    'audio/mpeg',
+    'audio/wav',
+    'application/pdf',
+    'application/msword',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document', // docx
+  ];
 
   /// Converts a date to a string key for storage
   static String dateToKey(DateTime date) {
@@ -130,6 +142,7 @@ class TopPrioritiesModel {
       'id': _uuid.v4(),
       'description': '',
       'notes': <String>[],
+      'documents': <Map<String, dynamic>>[],
       'isCompleted': false,
       'position': index,
       'metadata': {
@@ -138,5 +151,23 @@ class TopPrioritiesModel {
         'placeholder': true,
       },
     };
+  }
+
+  static String getDocumentTypeIcon(String mimeType) {
+    if (mimeType.startsWith('image/')) {
+      return 'assets/images/image_icon.png';
+    }
+    if (mimeType.startsWith('audio/')) {
+      return 'assets/images/audio_icon.png';
+    }
+    // Use document icon for all document types
+    if (mimeType.startsWith('application/pdf') ||
+        mimeType.startsWith('application/msword') ||
+        mimeType.startsWith('application/vnd.openxmlformats-officedocument.wordprocessingml.document') ||
+        mimeType.startsWith('text/')) {
+      return 'assets/images/document_icon.png';
+    }
+    // Default to document icon for unknown types
+    return 'assets/images/document_icon.png';
   }
 } 

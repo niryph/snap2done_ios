@@ -12,6 +12,12 @@ import '../../../utils/background_patterns.dart';
 import 'package:provider/provider.dart' as provider_pkg;
 import '../../../utils/theme_provider.dart';
 import 'package:intl/intl.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:url_launcher/url_launcher.dart';
+import '../../../services/storage_service.dart';
+import 'dart:io';
+import 'package:mime/mime.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 class TopPrioritiesPage extends StatefulWidget {
   final String? cardId;
@@ -516,6 +522,131 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
                                                           style: TextButton.styleFrom(
                                                             foregroundColor: Theme.of(context).primaryColor,
                                                           ),
+                                                        ),
+                                                      ],
+                                                    ),
+                                                    SizedBox(height: 16),
+                                                    // Documents section
+                                                    Column(
+                                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                                      children: [
+                                                        if ((task['documents'] as List<Map<String, dynamic>>?)?.isNotEmpty ?? false) ...[
+                                                          Text(
+                                                            'Documents',
+                                                            style: TextStyle(
+                                                              fontSize: 16,
+                                                              fontWeight: FontWeight.w500,
+                                                            ),
+                                                          ),
+                                                          SizedBox(height: 8),
+                                                          Wrap(
+                                                            spacing: 8,
+                                                            runSpacing: 8,
+                                                            children: [
+                                                              ...(task['documents'] as List<Map<String, dynamic>>).map((doc) {
+                                                                return Container(
+                                                                  width: 100,
+                                                                  child: Column(
+                                                                    children: [
+                                                                      Stack(
+                                                                        children: [
+                                                                          Container(
+                                                                            width: 80,
+                                                                            height: 80,
+                                                                            decoration: BoxDecoration(
+                                                                              color: Colors.grey.withOpacity(0.1),
+                                                                              borderRadius: BorderRadius.circular(8),
+                                                                            ),
+                                                                            child: InkWell(
+                                                                              onTap: () => _openDocument(doc),
+                                                                              child: Image.asset(
+                                                                                TopPrioritiesModel.getDocumentTypeIcon(doc['mimeType']),
+                                                                                width: 40,
+                                                                                height: 40,
+                                                                              ),
+                                                                            ),
+                                                                          ),
+                                                                          Positioned(
+                                                                            right: 0,
+                                                                            top: 0,
+                                                                            child: IconButton(
+                                                                              icon: Icon(Icons.close, size: 16, color: Colors.red),
+                                                                              onPressed: () async {
+                                                                                try {
+                                                                                  // Delete from storage first
+                                                                                  if (doc['wasabi_path'] != null) {
+                                                                                    await StorageService.deleteFile(doc['url']);
+                                                                                  }
+                                                                                  // Then remove from UI
+                                                                                  setState(() {
+                                                                                    (task['documents'] as List).remove(doc);
+                                                                                  });
+                                                                                } catch (e) {
+                                                                                  print('Error deleting document: $e');
+                                                                                  if (!mounted) return;
+                                                                                  ScaffoldMessenger.of(context).showSnackBar(
+                                                                                    SnackBar(content: Text('Error deleting document: $e')),
+                                                                                  );
+                                                                                }
+                                                                              },
+                                                                              padding: EdgeInsets.zero,
+                                                                              constraints: BoxConstraints(
+                                                                                minWidth: 24,
+                                                                                minHeight: 24,
+                                                                              ),
+                                                                              splashRadius: 16,
+                                                                            ),
+                                                                          ),
+                                                                        ],
+                                                                      ),
+                                                                      SizedBox(height: 4),
+                                                                      Text(
+                                                                        doc['name'] as String,
+                                                                        maxLines: 2,
+                                                                        overflow: TextOverflow.ellipsis,
+                                                                        textAlign: TextAlign.center,
+                                                                        style: TextStyle(
+                                                                          fontSize: 12,
+                                                                        ),
+                                                                      ),
+                                                                    ],
+                                                                  ),
+                                                                );
+                                                              }).toList(),
+                                                            ],
+                                                          ),
+                                                        ],
+                                                        SizedBox(height: 8),
+                                                        Row(
+                                                          children: [
+                                                            TextButton.icon(
+                                                              onPressed: () => _addDocument(task),
+                                                              icon: Image.asset(
+                                                                'assets/images/document_icon.png',
+                                                                width: 24,
+                                                                height: 24,
+                                                                color: Theme.of(context).primaryColor,
+                                                              ),
+                                                              label: Text('Add Document'),
+                                                              style: TextButton.styleFrom(
+                                                                foregroundColor: Theme.of(context).primaryColor,
+                                                              ),
+                                                            ),
+                                                            SizedBox(width: 16),
+                                                            TextButton.icon(
+                                                              onPressed: () => _addVoiceNote(task),
+                                                              icon: Image.asset(
+                                                                'assets/images/microphone.png',
+                                                                width: 24,
+                                                                height: 24,
+                                                                color: Theme.of(context).primaryColor,
+                                                              ),
+                                                              label: Text('Add Voice Note'),
+                                                              style: TextButton.styleFrom(
+                                                                foregroundColor: Theme.of(context).primaryColor,
+                                                              ),
+                                                            ),
+                                                          ],
                                                         ),
                                                       ],
                                                     ),
@@ -1031,5 +1162,175 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
       return false;
     }
     return true;
+  }
+
+  Future<void> _addDocument(Map<String, dynamic> task) async {
+    try {
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: ['jpg', 'jpeg', 'png', 'gif', 'mp3', 'wav', 'pdf', 'doc', 'docx'],
+        allowMultiple: false,
+      );
+
+      if (result != null) {
+        final file = result.files.first;
+        final fileName = file.name;
+        final mimeType = lookupMimeType(fileName) ?? 'application/octet-stream';
+
+        // Check file size (5MB limit)
+        if (file.size > 5 * 1024 * 1024) {
+          if (!mounted) return;
+          await showDialog(
+            context: context,
+            builder: (context) => AlertDialog(
+              title: Text('File Too Large'),
+              content: Text('The selected file is too large. Please choose a file smaller than 5MB.'),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: Text('OK'),
+                ),
+              ],
+            ),
+          );
+          return;
+        }
+
+        if (!TopPrioritiesModel.supportedDocumentTypes.contains(mimeType)) {
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Unsupported file type')),
+          );
+          return;
+        }
+
+        // Show dialog to get document name
+        final name = await showDialog<String>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: Text('Document Name'),
+            content: TextField(
+              autofocus: true,
+              maxLength: TopPrioritiesModel.maxDocumentNameLength,
+              decoration: InputDecoration(
+                hintText: 'Enter document name',
+                counterText: '',
+              ),
+              controller: TextEditingController(text: fileName),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: Text('Cancel'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(context, fileName),
+                child: Text('OK'),
+              ),
+            ],
+          ),
+        );
+
+        if (name != null) {
+          // Upload file to storage and get URL
+          final result = await _uploadFile(File(file.path!), 'documents');
+          
+          setState(() {
+            if (task['documents'] == null) {
+              task['documents'] = <Map<String, dynamic>>[];
+            }
+            (task['documents'] as List<Map<String, dynamic>>).add({
+              'id': _uuid.v4(),
+              'name': name,
+              'url': result['url'],
+              'wasabi_path': result['wasabi_path'],
+              'mimeType': mimeType,
+              'size': file.size,
+              'uploadedAt': DateTime.now().toIso8601String(),
+            });
+          });
+        }
+      }
+    } catch (e) {
+      print('Error adding document: $e');
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error adding document: $e')),
+      );
+    }
+  }
+
+  Future<Map<String, String>> _uploadFile(File fileToUpload, String directory) async {
+    try {
+      final result = await StorageService.uploadFile(fileToUpload, directory);
+      return result;
+    } catch (e) {
+      print('Error uploading file: $e');
+      rethrow;
+    }
+  }
+
+  Future<void> _openDocument(Map<String, dynamic> doc) async {
+    try {
+      final signedUrl = await StorageService.getSignedUrl(doc['wasabi_path']);
+      
+      if (doc['mimeType'].startsWith('image/')) {
+        // Show image in dialog using the signed URL
+        if (!mounted) return;
+        showDialog(
+          context: context,
+          builder: (context) => Dialog(
+            child: Image.network(signedUrl),
+          ),
+        );
+      } else if (doc['mimeType'].contains('pdf')) {
+        // For PDFs, open directly in browser/system viewer
+        if (await canLaunch(signedUrl)) {
+          await launch(signedUrl);
+        } else {
+          throw 'Could not launch $signedUrl';
+        }
+      } else {
+        // For other file types, open in browser/system viewer
+        if (await canLaunch(signedUrl)) {
+          await launch(signedUrl);
+        } else {
+          throw 'Could not launch $signedUrl';
+        }
+      }
+    } catch (e) {
+      print('Error opening document: $e');
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error opening document: $e')),
+      );
+    }
+  }
+
+  Future<void> _addVoiceNote(Map<String, dynamic> task) async {
+    try {
+      final result = await StorageService.recordAndUploadVoiceNote(context);
+      
+      if (result != null) {
+        setState(() {
+          if (task['documents'] == null) {
+            task['documents'] = <Map<String, dynamic>>[];
+          }
+          (task['documents'] as List<Map<String, dynamic>>).add({
+            'id': _uuid.v4(),
+            'name': 'Voice Note ${DateFormat('MMM d, y HH:mm').format(DateTime.now())}',
+            'url': result['url']!,
+            'mimeType': result['mimeType']!,
+            'uploadedAt': DateTime.now().toIso8601String(),
+          });
+        });
+      }
+    } catch (e) {
+      print('Error recording voice note: $e');
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error recording voice note: $e')),
+      );
+    }
   }
 } 

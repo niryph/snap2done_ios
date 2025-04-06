@@ -8,6 +8,7 @@ import 'package:path/path.dart' as path;
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:uuid/uuid.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:crypto/crypto.dart';
 
 class ImageService {
   static final SupabaseClient _supabase = Supabase.instance.client;
@@ -45,18 +46,68 @@ class ImageService {
       final fileName = '${Uuid().v4()}$fileExtension';
       final wasabiPath = 'images/$userId/$fileName';
       
-      // Upload to Supabase storage (which is configured to use Wasabi)
-      final bytes = await imageFile.readAsBytes();
-      await _supabase.storage.from('snap2done').uploadBinary(
-        wasabiPath,
-        bytes,
-        fileOptions: FileOptions(
-          contentType: 'image/${fileExtension.replaceAll('.', '')}',
-        ),
+      // Get Wasabi configuration
+      final configResponse = await _supabase
+          .from('app_configuration')
+          .select('key, value')
+          .inFilter('key', [
+            'WASABI_ACCESS_KEY',
+            'WASABI_SECRET_KEY',
+            'WASABI_BUCKET',
+            'WASABI_REGION'
+          ])
+          .limit(4);
+
+      final config = Map.fromEntries(
+        (configResponse as List<dynamic>).map((item) => MapEntry(item['key'] as String, item['value'] as String))
       );
       
+      // Prepare the request
+      final date = HttpDate.format(DateTime.now());
+      final contentType = 'image/${fileExtension.replaceAll('.', '')}';
+      
+      // Create canonical string for signing
+      final canonicalString = [
+        'PUT',
+        '',  // MD5
+        contentType,
+        date,
+        '/${config['WASABI_BUCKET']}/$wasabiPath'
+      ].join('\n');
+
+      // Create signature
+      final signature = base64.encode(
+        Hmac(sha1, utf8.encode(config['WASABI_SECRET_KEY']!))
+            .convert(utf8.encode(canonicalString))
+            .bytes
+      );
+
+      // Construct the bucket-specific endpoint
+      final endpoint = 'https://${config['WASABI_BUCKET']}.s3.${config['WASABI_REGION']}.wasabisys.com';
+      final uploadUri = Uri.parse('$endpoint/$wasabiPath');
+
+      // Create headers
+      final headers = {
+        'Host': uploadUri.host,
+        'Date': date,
+        'Content-Type': contentType,
+        'Authorization': 'AWS ${config['WASABI_ACCESS_KEY']}:$signature',
+      };
+      
+      // Upload the file
+      final bytes = await imageFile.readAsBytes();
+      final response = await http.put(
+        uploadUri,
+        headers: headers,
+        body: bytes,
+      );
+
+      if (response.statusCode != 200) {
+        throw Exception('Failed to upload file: ${response.statusCode}\nResponse: ${response.body}');
+      }
+
       // Get the public URL
-      final imageUrl = _supabase.storage.from('snap2done').getPublicUrl(wasabiPath);
+      final imageUrl = '$endpoint/$wasabiPath';
       
       // Process with OCR
       final ocrText = await _performOCR(bytes);
@@ -67,7 +118,7 @@ class ImageService {
         'wasabi_path': wasabiPath,
         'original_filename': path.basename(imageFile.path),
         'size_bytes': bytes.length,
-        'mime_type': 'image/${fileExtension.replaceAll('.', '')}',
+        'mime_type': contentType,
         'ocr_text': ocrText,
         'is_processed': true,
       }).select().single();
@@ -159,13 +210,27 @@ class ImageService {
           .eq('id', imageId)
           .single();
       
-      final imageUrl = _supabase.storage
-          .from('snap2done')
-          .getPublicUrl(imageRecord['wasabi_path']);
+      // Get the Wasabi configuration
+      final configResponse = await _supabase
+          .from('app_configuration')
+          .select('key, value')
+          .inFilter('key', [
+            'WASABI_BUCKET',
+            'WASABI_REGION'
+          ])
+          .limit(2);
+
+      final config = Map.fromEntries(
+        (configResponse as List<dynamic>).map((item) => MapEntry(item['key'] as String, item['value'] as String))
+      );
+
+      // Construct the Wasabi URL
+      final endpoint = 'https://${config['WASABI_BUCKET']}.s3.${config['WASABI_REGION']}.wasabisys.com';
+      final url = '$endpoint/${imageRecord['wasabi_path']}';
       
       return {
         ...imageRecord,
-        'url': imageUrl,
+        'url': url,
       };
     } catch (e) {
       print('Error getting image: $e');
