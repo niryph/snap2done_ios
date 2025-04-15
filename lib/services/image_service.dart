@@ -113,7 +113,7 @@ class ImageService {
       final ocrText = await _performOCR(bytes);
       
       // Save image record to database
-      final imageRecord = await _supabase.from('images').insert({
+      final imageRecord = await _supabase.from('attachments').insert({
         'user_id': userId,
         'wasabi_path': wasabiPath,
         'original_filename': path.basename(imageFile.path),
@@ -121,6 +121,7 @@ class ImageService {
         'mime_type': contentType,
         'ocr_text': ocrText,
         'is_processed': true,
+        'attachment_type': 'image'
       }).select().single();
       
       return {
@@ -205,7 +206,7 @@ class ImageService {
   static Future<Map<String, dynamic>> getImageById(String imageId) async {
     try {
       final imageRecord = await _supabase
-          .from('images')
+          .from('attachments')
           .select()
           .eq('id', imageId)
           .single();

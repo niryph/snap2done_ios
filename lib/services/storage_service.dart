@@ -6,9 +6,10 @@ import 'package:mime/mime.dart';
 import 'package:path/path.dart' as path;
 import 'package:uuid/uuid.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:record/record.dart';
+import 'package:record/record.dart' show AudioEncoder;
 import 'package:path_provider/path_provider.dart';
 import 'package:flutter/material.dart';
+import '../services/audio_recorder_service.dart';
 
 class StorageService {
   static final _uuid = Uuid();
@@ -200,10 +201,9 @@ class StorageService {
 
   /// Record and upload a voice note
   static Future<Map<String, String>?> recordAndUploadVoiceNote(BuildContext context) async {
-    final record = Record();
+    final record = AudioRecorderService.instance;
     
     try {
-      // Request microphone permission
       if (await record.hasPermission()) {
         // Get temp directory for saving recording
         final tempDir = await getTemporaryDirectory();
@@ -249,50 +249,12 @@ class StorageService {
           final path = await record.stop();
           
           if (path != null) {
-            // Show uploading dialog
-            showDialog(
-              context: context,
-              barrierDismissible: false,
-              builder: (context) => AlertDialog(
-                title: Text('Uploading Voice Note'),
-                content: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    CircularProgressIndicator(),
-                    SizedBox(height: 16),
-                    Text('Please wait...'),
-                  ],
-                ),
-              ),
-            );
-
-            try {
-              // Upload the recorded file
-              final file = File(path);
-              final uploadResult = await uploadFile(file, 'audio/m4a');
-              
-              // Delete temp file
-              await file.delete();
-              
-              // Close uploading dialog
-              Navigator.of(context).pop();
-              
-              return {
-                'url': uploadResult['url']!,
-                'mimeType': 'audio/m4a'
-              };
-            } catch (e) {
-              // Close uploading dialog
-              Navigator.of(context).pop();
-              rethrow;
-            }
+            return {
+              'path': path,
+              'mime_type': 'audio/m4a',
+            };
           }
-        } else {
-          // User cancelled recording
-          await record.stop();
         }
-      } else {
-        throw Exception('Microphone permission denied');
       }
     } catch (e) {
       print('Error recording voice note: $e');

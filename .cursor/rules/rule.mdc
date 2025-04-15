@@ -4,6 +4,11 @@ globs:
 alwaysApply: true
 ---
 # asset usage
+
+
+never change the design of the elements on the ui unless it is asked to do so.
+always limit the code lines being 700 per page. And use components to breakdownd if it needs to be more
+
 use assets/images folder for icons. if you use an icon from internet, download it to assets/images folder and use it from there.
 
 

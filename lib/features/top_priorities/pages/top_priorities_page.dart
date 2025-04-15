@@ -1,10 +1,18 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:record/record.dart' show AudioEncoder;
+import 'package:file_picker/file_picker.dart';
+import 'package:mime/mime.dart';
 import 'package:uuid/uuid.dart';
-import '../models/top_priorities_models.dart';
-import '../services/priorities_reminder_service.dart';
-import '../services/top_priorities_service.dart';
-import '../models/top_priorities_entry_model.dart';
+import '../../../services/audio_recorder_service.dart';
 import '../../../services/auth_service.dart';
+import '../../../services/top_priorities_service.dart';
+import '../../../services/attachment_service.dart';
+import '../../../services/card_service.dart';
+import '../models/top_priorities_model.dart';
+import '../services/priorities_reminder_service.dart';
+import '../models/top_priorities_entry_model.dart';
 import '../../../services/card_service.dart';
 import '../../../models/card_model.dart';
 import '../../../models/task_model.dart';
@@ -12,12 +20,11 @@ import '../../../utils/background_patterns.dart';
 import 'package:provider/provider.dart' as provider_pkg;
 import '../../../utils/theme_provider.dart';
 import 'package:intl/intl.dart';
-import 'package:file_picker/file_picker.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../../../services/storage_service.dart';
-import 'dart:io';
-import 'package:mime/mime.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import '../../../services/attachment_service.dart';
+import 'package:path/path.dart' as path;
 
 class TopPrioritiesPage extends StatefulWidget {
   final String? cardId;
@@ -41,6 +48,7 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
   late DateTime _selectedDate;
   late TimeOfDay _reminderTime;
   late List<Map<String, dynamic>> _tasks;
+  late List<Map<String, dynamic>> _attachments = [];
   final _uuid = Uuid();
   bool _isLoading = false;
   int? _draggedItemIndex;
@@ -85,19 +93,41 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
   }
 
   void _initializeFromMetadata() {
-    // Get tasks for today or create defaults
-    final dateKey = TopPrioritiesModel.dateToKey(_selectedDate);
-    final dayData = widget.metadata!['priorities']?[dateKey];
+    print('[TopPrioritiesPage] Initializing from metadata');
     
-    if (dayData != null) {
-      _tasks = List<Map<String, dynamic>>.from(dayData['tasks']);
-      _migrateNotesToList();
-    } else {
-      _tasks = TopPrioritiesModel.getDefaultTasks();
+    final card = CardService.getCard(widget.cardId!);
+    print('[TopPrioritiesPage] Card: ${card?.id}, metadata: ${card?.metadata}');
+    
+    if (card?.metadata == null) {
+      print('[TopPrioritiesPage] No metadata found for card');
+      return;
     }
-    
-    // Initialize text controllers
-    _initializeTextControllers();
+
+    final metadata = card!.metadata!;
+    print('[TopPrioritiesPage] Processing metadata: $metadata');
+
+    // Initialize date
+    if (metadata['date'] != null) {
+      print('[TopPrioritiesPage] Setting date: ${metadata['date']}');
+      _selectedDate = DateTime.parse(metadata['date']);
+    }
+
+    // Initialize tasks
+    if (metadata['tasks'] != null) {
+      print('[TopPrioritiesPage] Setting tasks: ${metadata['tasks']}');
+      _tasks = List<Map<String, dynamic>>.from(metadata['tasks']);
+    }
+
+    // Initialize attachments
+    if (metadata['attachments'] != null) {
+      print('[TopPrioritiesPage] Setting attachments: ${metadata['attachments']}');
+      _attachments = List<Map<String, dynamic>>.from(metadata['attachments']);
+    }
+
+    print('[TopPrioritiesPage] Initialization complete');
+    print('[TopPrioritiesPage] Date: $_selectedDate');
+    print('[TopPrioritiesPage] Tasks count: ${_tasks.length}');
+    print('[TopPrioritiesPage] Attachments count: ${_attachments.length}');
   }
 
   void _migrateNotesToList() {
@@ -129,714 +159,756 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
           ),
           
           // Main content
-          Scaffold(
-            backgroundColor: Colors.transparent,
-            appBar: AppBar(
-              title: Text(widget.isEditing ? 'Daily Top Priorities' : 'Create Daily Top Priorities'),
-              backgroundColor: themeProvider.isDarkMode ? Colors.grey[900]?.withOpacity(0.7) : Colors.white.withOpacity(0.7),
-              foregroundColor: themeProvider.isDarkMode ? Colors.white : Colors.black87,
-              elevation: 0,
-              leading: IconButton(
-                icon: Icon(Icons.arrow_back),
-                onPressed: () {
-                  _onBackPressed().then((canPop) {
-                    if (canPop) {
-                      Navigator.of(context).pop();
+          StreamBuilder<List<CardModel>>(
+            stream: CardService.cardStream,
+            builder: (context, snapshot) {
+              print('[TopPrioritiesPage] StreamBuilder update:');
+              print('[TopPrioritiesPage] Has data: ${snapshot.hasData}');
+              print('[TopPrioritiesPage] Has error: ${snapshot.hasError}');
+              if (snapshot.hasData) {
+                print('[TopPrioritiesPage] Data length: ${snapshot.data?.length}');
+                print('[TopPrioritiesPage] Cards: ${snapshot.data?.map((c) => '${c.id}: ${c.metadata?['type']}')}');
+              }
+              
+              if (snapshot.hasError) {
+                debugPrint('[TopPrioritiesPage] Error in card stream: ${snapshot.error}');
+                return Center(child: Text('Error loading cards'));
+              }
+
+              // If we have data and this card exists in the stream, update our local state
+              if (snapshot.hasData && widget.cardId != null) {
+                print('[TopPrioritiesPage] Looking for card: ${widget.cardId}');
+                final card = snapshot.data!.firstWhere(
+                  (card) => card.id == widget.cardId,
+                  orElse: () => CardModel.fromMap({}),
+                );
+                
+                print('[TopPrioritiesPage] Found card: ${card.id}, metadata: ${card.metadata}');
+                
+                if (card.id != null && card.metadata != null) {
+                  // Update local state with new card data
+                  print('[TopPrioritiesPage] Scheduling state update with new card data');
+                  WidgetsBinding.instance.addPostFrameCallback((_) {
+                    if (mounted) {
+                      print('[TopPrioritiesPage] Updating state with new card data');
+                      setState(() {
+                        _initializeFromMetadata();
+                      });
                     }
                   });
-                },
-              ),
-              actions: [
-                if (widget.isEditing) 
-                  IconButton(
-                    icon: Icon(Icons.delete, color: Colors.red),
-                    onPressed: _deleteCard,
+                }
+              }
+
+              return Scaffold(
+                backgroundColor: Colors.transparent,
+                appBar: AppBar(
+                  title: Text(widget.isEditing ? 'Daily Top Priorities' : 'Create Daily Top Priorities'),
+                  backgroundColor: themeProvider.isDarkMode ? Colors.grey[900]?.withOpacity(0.7) : Colors.white.withOpacity(0.7),
+                  foregroundColor: themeProvider.isDarkMode ? Colors.white : Colors.black87,
+                  elevation: 0,
+                  leading: IconButton(
+                    icon: Icon(Icons.arrow_back),
+                    onPressed: () {
+                      _onBackPressed().then((canPop) {
+                        if (canPop) {
+                          Navigator.of(context).pop();
+                        }
+                      });
+                    },
                   ),
-              ],
-            ),
-            extendBody: !widget.isEditing,
-            body: Column(
-              children: [
-                Expanded(
-                  child: _isLoading
-                    ? Center(child: CircularProgressIndicator())
-                    : SingleChildScrollView(
-                        padding: EdgeInsets.only(
-                          left: 16.0,
-                          right: 16.0,
-                          top: 16.0,
-                          bottom: widget.isEditing ? 16.0 : 80.0,
-                        ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            // Date navigation
-                            Card(
-                              elevation: 2,
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(12),
-                              ),
-                              color: themeProvider.isDarkMode ? Colors.grey[900]?.withOpacity(0.7) : Colors.white.withOpacity(0.7),
-                              child: Padding(
-                                padding: EdgeInsets.symmetric(vertical: 8),
-                                child: Row(
-                                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                                  children: [
-                                    IconButton(
-                                      icon: Icon(Icons.chevron_left),
-                                      onPressed: () {
-                                        _selectDate(_selectedDate.subtract(Duration(days: 1)));
-                                      },
-                                    ),
-                                    Expanded(
-                                      child: InkWell(
-                                        onTap: () => _showDatePicker(),
-                                        child: Column(
-                                          mainAxisSize: MainAxisSize.min,
-                                          children: [
-                                            Text(
-                                              TopPrioritiesModel.formatDate(_selectedDate, context),
-                                              style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                                                fontWeight: FontWeight.bold,
-                                              ),
-                                              textAlign: TextAlign.center,
-                                            ),
-                                            if (_isSpecialDate(_selectedDate)) ...[
-                                              SizedBox(height: 4),
-                                              Text(
-                                                DateFormat.yMMMd(Localizations.localeOf(context).toString()).format(_selectedDate),
-                                                style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                                                  color: Theme.of(context).textTheme.bodySmall?.color?.withOpacity(0.7),
-                                                ),
-                                                textAlign: TextAlign.center,
-                                              ),
-                                            ],
-                                          ],
-                                        ),
-                                      ),
-                                    ),
-                                    IconButton(
-                                      icon: Icon(Icons.chevron_right),
-                                      onPressed: () {
-                                        _selectDate(_selectedDate.add(Duration(days: 1)));
-                                      },
-                                    ),
-                                  ],
-                                ),
-                              ),
+                  actions: [
+                    if (widget.isEditing) 
+                      IconButton(
+                        icon: Icon(Icons.delete, color: Colors.red),
+                        onPressed: _deleteCard,
+                      ),
+                  ],
+                ),
+                extendBody: !widget.isEditing,
+                body: Column(
+                  children: [
+                    Expanded(
+                      child: _isLoading
+                        ? Center(child: CircularProgressIndicator())
+                        : SingleChildScrollView(
+                            padding: EdgeInsets.only(
+                              left: 16.0,
+                              right: 16.0,
+                              top: 16.0,
+                              bottom: widget.isEditing ? 16.0 : 80.0,
                             ),
-                            SizedBox(height: 16),
-                            
-                            // Tasks list
-                            ReorderableListView.builder(
-                              buildDefaultDragHandles: false,
-                              shrinkWrap: true,
-                              physics: NeverScrollableScrollPhysics(),
-                              itemCount: _tasks.length,
-                              onReorder: (oldIndex, newIndex) {
-                                setState(() {
-                                  if (oldIndex < newIndex) {
-                                    newIndex -= 1;
-                                  }
-                                  final item = _tasks.removeAt(oldIndex);
-                                  _tasks.insert(newIndex, item);
-                                  
-                                  // Update positions after reorder
-                                  for (var i = 0; i < _tasks.length; i++) {
-                                    _tasks[i]['position'] = i;
-                                    _tasks[i]['metadata'] = {
-                                      ..._tasks[i]['metadata'] ?? {},
-                                      'type': 'top_priority',
-                                      'order': i + 1,
-                                    };
-                                  }
-                                });
-                              },
-                              proxyDecorator: (child, index, animation) {
-                                return Material(
-                                  elevation: 5,
-                                  color: Colors.transparent,
-                                  borderRadius: BorderRadius.circular(12),
-                                  child: child,
-                                );
-                              },
-                              itemBuilder: (context, index) {
-                                final task = _tasks[index];
-                                return KeyedSubtree(
-                                  key: Key(task['id']),
-                                  child: ReorderableDragStartListener(
-                                    index: index,
-                                    child: MouseRegion(
-                                      cursor: SystemMouseCursors.grab,
-                                      child: Card(
-                                        key: ValueKey(task['id']),
-                                        margin: EdgeInsets.only(bottom: 16),
-                                        shape: RoundedRectangleBorder(
-                                          borderRadius: BorderRadius.circular(12),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                // Date navigation
+                                Card(
+                                  elevation: 2,
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                  color: themeProvider.isDarkMode ? Colors.grey[900]?.withOpacity(0.7) : Colors.white.withOpacity(0.7),
+                                  child: Padding(
+                                    padding: EdgeInsets.symmetric(vertical: 8),
+                                    child: Row(
+                                      mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                                      children: [
+                                        IconButton(
+                                          icon: Icon(Icons.chevron_left),
+                                          onPressed: () {
+                                            _selectDate(_selectedDate.subtract(Duration(days: 1)));
+                                          },
                                         ),
-                                        color: themeProvider.isDarkMode ? Colors.grey[900]?.withOpacity(0.7) : Colors.white.withOpacity(0.7),
-                                        child: Theme(
-                                          data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
-                                          child: ExpansionTile(
-                                            key: ValueKey('tile-${task['id']}-${task['isExpanded'] ?? false}'),
-                                            onExpansionChanged: (expanded) {
-                                              setState(() {
-                                                if (expanded) {
-                                                  // Store original state when expanding
-                                                  task['_originalState'] = {
-                                                    'description': task['description'],
-                                                    'notes': task['notes'],
-                                                    'metadata': Map<String, dynamic>.from(task['metadata'] ?? {}),
-                                                  };
-                                                }
-                                                task['isExpanded'] = expanded;
-                                              });
-                                            },
-                                            initiallyExpanded: task['isExpanded'] ?? false,
-                                            maintainState: false,
-                                            leading: widget.isEditing ? Checkbox(
-                                              value: task['isCompleted'] ?? false,
-                                              activeColor: Theme.of(context).primaryColor,
-                                              shape: RoundedRectangleBorder(
-                                                borderRadius: BorderRadius.circular(4),
-                                              ),
-                                              onChanged: (value) {
-                                                setState(() {
-                                                  task['isCompleted'] = value;
-                                                });
-                                              },
-                                            ) : Container(
-                                              width: 24,
-                                              height: 24,
-                                              margin: EdgeInsets.symmetric(horizontal: 8),
-                                              decoration: BoxDecoration(
-                                                shape: BoxShape.circle,
-                                                color: Theme.of(context).primaryColor.withOpacity(0.2),
-                                                border: Border.all(
-                                                  color: Theme.of(context).primaryColor,
-                                                  width: 2,
-                                                ),
-                                              ),
-                                              child: Center(
-                                                child: Container(
-                                                  width: 12,
-                                                  height: 12,
-                                                  decoration: BoxDecoration(
-                                                    shape: BoxShape.circle,
-                                                    color: Theme.of(context).primaryColor,
-                                                  ),
-                                                ),
-                                              ),
-                                            ),
-                                            title: Text(
-                                              task['metadata']?['placeholder'] == true 
-                                                ? 'Priority #${task['metadata']?['order']}'
-                                                : (task['description'] ?? ''),
-                                              style: TextStyle(
-                                                decoration: task['isCompleted'] == true ? TextDecoration.lineThrough : null,
-                                                fontSize: 16,
-                                                fontStyle: task['metadata']?['placeholder'] == true ? FontStyle.italic : FontStyle.normal,
-                                                color: task['metadata']?['placeholder'] == true ? Colors.grey : null,
-                                              ),
-                                            ),
-                                            trailing: Row(
+                                        Expanded(
+                                          child: InkWell(
+                                            onTap: () => _showDatePicker(),
+                                            child: Column(
                                               mainAxisSize: MainAxisSize.min,
                                               children: [
-                                                if (task['reminderTime'] != null)
-                                                  Padding(
-                                                    padding: EdgeInsets.only(right: 8),
-                                                    child: Icon(
-                                                      Icons.alarm_on,
-                                                      size: 20,
-                                                      color: Theme.of(context).primaryColor,
-                                                    ),
+                                                Text(
+                                                  TopPrioritiesModel.formatDate(_selectedDate, context),
+                                                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                                                    fontWeight: FontWeight.bold,
                                                   ),
-                                                IconButton(
-                                                  icon: Icon(Icons.delete_outline, size: 20),
-                                                  color: Colors.red.withOpacity(0.7),
-                                                  onPressed: () {
-                                                    setState(() {
-                                                      _tasks.removeAt(index);
-                                                      // Update order for remaining tasks
-                                                      for (var i = 0; i < _tasks.length; i++) {
-                                                        _tasks[i]['position'] = i;
-                                                        _tasks[i]['metadata'] = {
-                                                          ..._tasks[i]['metadata'] ?? {},
-                                                          'type': 'top_priority',
-                                                          'order': i + 1,
-                                                        };
-                                                      }
-                                                    });
-                                                  },
-                                                  padding: EdgeInsets.zero,
-                                                  constraints: BoxConstraints(
-                                                    minWidth: 36,
-                                                    minHeight: 36,
-                                                  ),
-                                                  splashRadius: 20,
+                                                  textAlign: TextAlign.center,
                                                 ),
-                                                Icon(Icons.drag_handle, color: Colors.grey),
+                                                if (_isSpecialDate(_selectedDate)) ...[
+                                                  SizedBox(height: 4),
+                                                  Text(
+                                                    DateFormat.yMMMd(Localizations.localeOf(context).toString()).format(_selectedDate),
+                                                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                                                      color: Theme.of(context).textTheme.bodySmall?.color?.withOpacity(0.7),
+                                                    ),
+                                                    textAlign: TextAlign.center,
+                                                  ),
+                                                ],
                                               ],
                                             ),
+                                          ),
+                                        ),
+                                        IconButton(
+                                          icon: Icon(Icons.chevron_right),
+                                          onPressed: () {
+                                            _selectDate(_selectedDate.add(Duration(days: 1)));
+                                          },
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                                SizedBox(height: 16),
+                                
+                                // Tasks list
+                                ReorderableListView.builder(
+                                  buildDefaultDragHandles: false,
+                                  shrinkWrap: true,
+                                  physics: NeverScrollableScrollPhysics(),
+                                  itemCount: _tasks.length,
+                                  onReorder: (oldIndex, newIndex) {
+                                    setState(() {
+                                      if (oldIndex < newIndex) {
+                                        newIndex -= 1;
+                                      }
+                                      final item = _tasks.removeAt(oldIndex);
+                                      _tasks.insert(newIndex, item);
+                                      
+                                      // Update positions after reorder
+                                      for (var i = 0; i < _tasks.length; i++) {
+                                        _tasks[i]['position'] = i;
+                                        _tasks[i]['metadata'] = {
+                                          ..._tasks[i]['metadata'] ?? {},
+                                          'type': 'top_priority',
+                                          'order': i + 1,
+                                        };
+                                      }
+                                    });
+                                  },
+                                  proxyDecorator: (child, index, animation) {
+                                    return Material(
+                                      elevation: 5,
+                                      color: Colors.transparent,
+                                      borderRadius: BorderRadius.circular(12),
+                                      child: child,
+                                    );
+                                  },
+                                  itemBuilder: (context, index) {
+                                    final task = _tasks[index];
+                                    return KeyedSubtree(
+                                      key: Key(task['id']),
+                                      child: ReorderableDragStartListener(
+                                        index: index,
+                                        child: MouseRegion(
+                                          cursor: SystemMouseCursors.grab,
+                                          child: Card(
+                                            key: ValueKey(task['id']),
+                                            margin: EdgeInsets.only(bottom: 16),
                                             shape: RoundedRectangleBorder(
                                               borderRadius: BorderRadius.circular(12),
                                             ),
-                                            collapsedShape: RoundedRectangleBorder(
-                                              borderRadius: BorderRadius.circular(12),
-                                            ),
-                                            backgroundColor: Colors.transparent,
-                                            collapsedBackgroundColor: Colors.transparent,
-                                            tilePadding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                                            expandedAlignment: Alignment.topLeft,
-                                            childrenPadding: EdgeInsets.zero,
-                                            children: [
-                                              Container(
-                                                padding: EdgeInsets.all(16),
-                                                child: Column(
-                                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                                  children: [
-                                                    // Description field
-                                                    TextField(
-                                                      controller: _textControllers[task['id']],
-                                                      maxLength: TopPrioritiesModel.maxDescriptionLength,
-                                                      onTap: task['metadata']?['placeholder'] == true ? () {
-                                                        // Clear the text only on first tap for placeholder items
-                                                        _textControllers[task['id']]?.clear();
-                                                        setState(() {
-                                                          task['description'] = '';
-                                                          task['metadata']?['placeholder'] = false;
-                                                        });
-                                                      } : null,
-                                                      decoration: InputDecoration(
-                                                        labelText: 'Description',
-                                                        hintText: task['metadata']?['placeholder'] == true ? 'Priority #${task['metadata']?['order']}' : null,
-                                                        hintStyle: const TextStyle(
-                                                          fontStyle: FontStyle.italic,
-                                                          color: Colors.grey,
-                                                        ),
-                                                        border: OutlineInputBorder(
-                                                          borderRadius: BorderRadius.circular(8),
-                                                        ),
-                                                        focusedBorder: OutlineInputBorder(
-                                                          borderRadius: BorderRadius.circular(8),
-                                                          borderSide: BorderSide(
-                                                            color: Theme.of(context).primaryColor,
-                                                            width: 2,
-                                                          ),
-                                                        ),
-                                                        counterText: '',
+                                            color: themeProvider.isDarkMode ? Colors.grey[900]?.withOpacity(0.7) : Colors.white.withOpacity(0.7),
+                                            child: Theme(
+                                              data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+                                              child: ExpansionTile(
+                                                key: ValueKey('tile-${task['id']}-${task['isExpanded'] ?? false}'),
+                                                onExpansionChanged: (expanded) {
+                                                  setState(() {
+                                                    if (expanded) {
+                                                      // Store original state when expanding
+                                                      task['_originalState'] = {
+                                                        'description': task['description'],
+                                                        'notes': task['notes'],
+                                                        'metadata': Map<String, dynamic>.from(task['metadata'] ?? {}),
+                                                      };
+                                                    }
+                                                    task['isExpanded'] = expanded;
+                                                  });
+                                                },
+                                                initiallyExpanded: task['isExpanded'] ?? false,
+                                                maintainState: false,
+                                                leading: widget.isEditing ? Checkbox(
+                                                  value: task['isCompleted'] ?? false,
+                                                  activeColor: Theme.of(context).primaryColor,
+                                                  shape: RoundedRectangleBorder(
+                                                    borderRadius: BorderRadius.circular(4),
+                                                  ),
+                                                  onChanged: (value) {
+                                                    setState(() {
+                                                      task['isCompleted'] = value;
+                                                    });
+                                                  },
+                                                ) : Container(
+                                                  width: 24,
+                                                  height: 24,
+                                                  margin: EdgeInsets.symmetric(horizontal: 8),
+                                                  decoration: BoxDecoration(
+                                                    shape: BoxShape.circle,
+                                                    color: Theme.of(context).primaryColor.withOpacity(0.2),
+                                                    border: Border.all(
+                                                      color: Theme.of(context).primaryColor,
+                                                      width: 2,
+                                                    ),
+                                                  ),
+                                                  child: Center(
+                                                    child: Container(
+                                                      width: 12,
+                                                      height: 12,
+                                                      decoration: BoxDecoration(
+                                                        shape: BoxShape.circle,
+                                                        color: Theme.of(context).primaryColor,
                                                       ),
-                                                      onChanged: (value) {
+                                                    ),
+                                                  ),
+                                                ),
+                                                title: Text(
+                                                  task['metadata']?['placeholder'] == true 
+                                                    ? 'Priority #${task['metadata']?['order']}'
+                                                    : (task['description'] ?? ''),
+                                                  style: TextStyle(
+                                                    decoration: task['isCompleted'] == true ? TextDecoration.lineThrough : null,
+                                                    fontSize: 16,
+                                                    fontStyle: task['metadata']?['placeholder'] == true ? FontStyle.italic : FontStyle.normal,
+                                                    color: task['metadata']?['placeholder'] == true ? Colors.grey : null,
+                                                  ),
+                                                ),
+                                                trailing: Row(
+                                                  mainAxisSize: MainAxisSize.min,
+                                                  children: [
+                                                    if (task['reminderTime'] != null)
+                                                      Padding(
+                                                        padding: EdgeInsets.only(right: 8),
+                                                        child: Icon(
+                                                          Icons.alarm_on,
+                                                          size: 20,
+                                                          color: Theme.of(context).primaryColor,
+                                                        ),
+                                                      ),
+                                                    IconButton(
+                                                      icon: Icon(Icons.delete_outline, size: 20),
+                                                      color: Colors.red.withOpacity(0.7),
+                                                      onPressed: () {
                                                         setState(() {
-                                                          task['description'] = value;
-                                                          // Remove placeholder flag when user starts typing
-                                                          if (value.isNotEmpty && task['metadata']?['placeholder'] == true) {
-                                                            task['metadata']?['placeholder'] = false;
-                                                          }
-                                                          // Restore placeholder if field is emptied
-                                                          if (value.isEmpty) {
-                                                            task['metadata']?['placeholder'] = true;
+                                                          _tasks.removeAt(index);
+                                                          // Update order for remaining tasks
+                                                          for (var i = 0; i < _tasks.length; i++) {
+                                                            _tasks[i]['position'] = i;
+                                                            _tasks[i]['metadata'] = {
+                                                              ..._tasks[i]['metadata'] ?? {},
+                                                              'type': 'top_priority',
+                                                              'order': i + 1,
+                                                            };
                                                           }
                                                         });
                                                       },
+                                                      padding: EdgeInsets.zero,
+                                                      constraints: BoxConstraints(
+                                                        minWidth: 36,
+                                                        minHeight: 36,
+                                                      ),
+                                                      splashRadius: 20,
                                                     ),
-                                                    SizedBox(height: 16),
-                                                    // Notes section
-                                                    Column(
+                                                    Icon(Icons.drag_handle, color: Colors.grey),
+                                                  ],
+                                                ),
+                                                shape: RoundedRectangleBorder(
+                                                  borderRadius: BorderRadius.circular(12),
+                                                ),
+                                                collapsedShape: RoundedRectangleBorder(
+                                                  borderRadius: BorderRadius.circular(12),
+                                                ),
+                                                backgroundColor: Colors.transparent,
+                                                collapsedBackgroundColor: Colors.transparent,
+                                                tilePadding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                                                expandedAlignment: Alignment.topLeft,
+                                                childrenPadding: EdgeInsets.zero,
+                                                children: [
+                                                  Container(
+                                                    padding: EdgeInsets.all(16),
+                                                    child: Column(
                                                       crossAxisAlignment: CrossAxisAlignment.start,
                                                       children: [
-                                                        if ((task['notes'] as List<String>?)?.isNotEmpty ?? false) ...[
-                                                          Text(
-                                                            'Notes',
-                                                            style: TextStyle(
-                                                              fontSize: 16,
-                                                              fontWeight: FontWeight.w500,
+                                                        // Description field
+                                                        TextField(
+                                                          controller: _textControllers[task['id']],
+                                                          maxLength: TopPrioritiesModel.maxDescriptionLength,
+                                                          onTap: task['metadata']?['placeholder'] == true ? () {
+                                                            // Clear the text only on first tap for placeholder items
+                                                            _textControllers[task['id']]?.clear();
+                                                            setState(() {
+                                                              task['description'] = '';
+                                                              task['metadata']?['placeholder'] = false;
+                                                            });
+                                                          } : null,
+                                                          decoration: InputDecoration(
+                                                            labelText: 'Description',
+                                                            hintText: task['metadata']?['placeholder'] == true ? 'Priority #${task['metadata']?['order']}' : null,
+                                                            hintStyle: const TextStyle(
+                                                              fontStyle: FontStyle.italic,
+                                                              color: Colors.grey,
                                                             ),
-                                                          ),
-                                                          SizedBox(height: 8),
-                                                          ...List.generate(
-                                                            (task['notes'] as List<String>?)?.length ?? 0,
-                                                            (index) => Padding(
-                                                              padding: EdgeInsets.only(bottom: 8),
-                                                              child: Stack(
-                                                                children: [
-                                                                  TextFormField(
-                                                                    initialValue: (task['notes'] as List<String>?)?[index] ?? '',
-                                                                    decoration: InputDecoration(
-                                                                      hintText: 'Enter note',
-                                                                      border: OutlineInputBorder(
-                                                                        borderRadius: BorderRadius.circular(8),
-                                                                      ),
-                                                                      focusedBorder: OutlineInputBorder(
-                                                                        borderRadius: BorderRadius.circular(8),
-                                                                        borderSide: BorderSide(
-                                                                          color: Theme.of(context).primaryColor,
-                                                                          width: 2,
-                                                                        ),
-                                                                      ),
-                                                                      counterText: '',
-                                                                    ),
-                                                                    maxLength: TopPrioritiesModel.maxNoteLength,
-                                                                    maxLines: null,
-                                                                    onChanged: (value) {
-                                                                      setState(() {
-                                                                        (task['notes'] as List<String>?)?[index] = value;
-                                                                      });
-                                                                    },
-                                                                  ),
-                                                                  Positioned(
-                                                                    right: 0,
-                                                                    top: 0,
-                                                                    child: IconButton(
-                                                                      icon: Icon(Icons.close, size: 20),
-                                                                      onPressed: () {
-                                                                        setState(() {
-                                                                          (task['notes'] as List<String>?)?.removeAt(index);
-                                                                        });
-                                                                      },
-                                                                      padding: EdgeInsets.zero,
-                                                                      constraints: BoxConstraints(
-                                                                        minWidth: 36,
-                                                                        minHeight: 36,
-                                                                      ),
-                                                                      splashRadius: 20,
-                                                                    ),
-                                                                  ),
-                                                                ],
+                                                            border: OutlineInputBorder(
+                                                              borderRadius: BorderRadius.circular(8),
+                                                            ),
+                                                            focusedBorder: OutlineInputBorder(
+                                                              borderRadius: BorderRadius.circular(8),
+                                                              borderSide: BorderSide(
+                                                                color: Theme.of(context).primaryColor,
+                                                                width: 2,
                                                               ),
                                                             ),
+                                                            counterText: '',
                                                           ),
-                                                        ],
-                                                        SizedBox(height: 8),
-                                                        TextButton.icon(
-                                                          onPressed: () {
+                                                          onChanged: (value) {
                                                             setState(() {
-                                                              if (task['notes'] == null) {
-                                                                task['notes'] = <String>[];
+                                                              task['description'] = value;
+                                                              // Remove placeholder flag when user starts typing
+                                                              if (value.isNotEmpty && task['metadata']?['placeholder'] == true) {
+                                                                task['metadata']?['placeholder'] = false;
                                                               }
-                                                              (task['notes'] as List<String>).add('');
+                                                              // Restore placeholder if field is emptied
+                                                              if (value.isEmpty) {
+                                                                task['metadata']?['placeholder'] = true;
+                                                              }
                                                             });
                                                           },
-                                                          icon: Icon(Icons.add),
-                                                          label: Text('Add Note'),
-                                                          style: TextButton.styleFrom(
-                                                            foregroundColor: Theme.of(context).primaryColor,
-                                                          ),
                                                         ),
-                                                      ],
-                                                    ),
-                                                    SizedBox(height: 16),
-                                                    // Documents section
-                                                    Column(
-                                                      crossAxisAlignment: CrossAxisAlignment.start,
-                                                      children: [
-                                                        if ((task['documents'] as List<Map<String, dynamic>>?)?.isNotEmpty ?? false) ...[
-                                                          Text(
-                                                            'Documents',
-                                                            style: TextStyle(
-                                                              fontSize: 16,
-                                                              fontWeight: FontWeight.w500,
-                                                            ),
-                                                          ),
-                                                          SizedBox(height: 8),
-                                                          Wrap(
-                                                            spacing: 8,
-                                                            runSpacing: 8,
-                                                            children: [
-                                                              ...(task['documents'] as List<Map<String, dynamic>>).map((doc) {
-                                                                return Container(
-                                                                  width: 100,
-                                                                  child: Column(
+                                                        SizedBox(height: 16),
+                                                        // Notes section
+                                                        Column(
+                                                          crossAxisAlignment: CrossAxisAlignment.start,
+                                                          children: [
+                                                            if ((task['notes'] as List<String>?)?.isNotEmpty ?? false) ...[
+                                                              Text(
+                                                                'Notes',
+                                                                style: TextStyle(
+                                                                  fontSize: 16,
+                                                                  fontWeight: FontWeight.w500,
+                                                                ),
+                                                              ),
+                                                              SizedBox(height: 8),
+                                                              ...List.generate(
+                                                                (task['notes'] as List<String>?)?.length ?? 0,
+                                                                (index) => Padding(
+                                                                  padding: EdgeInsets.only(bottom: 8),
+                                                                  child: Stack(
                                                                     children: [
-                                                                      Stack(
-                                                                        children: [
-                                                                          Container(
-                                                                            width: 80,
-                                                                            height: 80,
-                                                                            decoration: BoxDecoration(
-                                                                              color: Colors.grey.withOpacity(0.1),
-                                                                              borderRadius: BorderRadius.circular(8),
-                                                                            ),
-                                                                            child: InkWell(
-                                                                              onTap: () => _openDocument(doc),
-                                                                              child: Image.asset(
-                                                                                TopPrioritiesModel.getDocumentTypeIcon(doc['mimeType']),
-                                                                                width: 40,
-                                                                                height: 40,
-                                                                              ),
+                                                                      TextFormField(
+                                                                        initialValue: (task['notes'] as List<String>?)?[index] ?? '',
+                                                                        decoration: InputDecoration(
+                                                                          hintText: 'Enter note',
+                                                                          border: OutlineInputBorder(
+                                                                            borderRadius: BorderRadius.circular(8),
+                                                                          ),
+                                                                          focusedBorder: OutlineInputBorder(
+                                                                            borderRadius: BorderRadius.circular(8),
+                                                                            borderSide: BorderSide(
+                                                                              color: Theme.of(context).primaryColor,
+                                                                              width: 2,
                                                                             ),
                                                                           ),
-                                                                          Positioned(
-                                                                            right: 0,
-                                                                            top: 0,
-                                                                            child: IconButton(
-                                                                              icon: Icon(Icons.close, size: 16, color: Colors.red),
-                                                                              onPressed: () async {
-                                                                                try {
-                                                                                  // Delete from storage first
-                                                                                  if (doc['wasabi_path'] != null) {
-                                                                                    await StorageService.deleteFile(doc['url']);
-                                                                                  }
-                                                                                  // Then remove from UI
-                                                                                  setState(() {
-                                                                                    (task['documents'] as List).remove(doc);
-                                                                                  });
-                                                                                } catch (e) {
-                                                                                  print('Error deleting document: $e');
-                                                                                  if (!mounted) return;
-                                                                                  ScaffoldMessenger.of(context).showSnackBar(
-                                                                                    SnackBar(content: Text('Error deleting document: $e')),
-                                                                                  );
-                                                                                }
-                                                                              },
-                                                                              padding: EdgeInsets.zero,
-                                                                              constraints: BoxConstraints(
-                                                                                minWidth: 24,
-                                                                                minHeight: 24,
-                                                                              ),
-                                                                              splashRadius: 16,
-                                                                            ),
-                                                                          ),
-                                                                        ],
+                                                                          counterText: '',
+                                                                        ),
+                                                                        maxLength: TopPrioritiesModel.maxNoteLength,
+                                                                        maxLines: null,
+                                                                        onChanged: (value) {
+                                                                          setState(() {
+                                                                            (task['notes'] as List<String>?)?[index] = value;
+                                                                          });
+                                                                        },
                                                                       ),
-                                                                      SizedBox(height: 4),
-                                                                      Text(
-                                                                        doc['name'] as String,
-                                                                        maxLines: 2,
-                                                                        overflow: TextOverflow.ellipsis,
-                                                                        textAlign: TextAlign.center,
-                                                                        style: TextStyle(
-                                                                          fontSize: 12,
+                                                                      Positioned(
+                                                                        right: 0,
+                                                                        top: 0,
+                                                                        child: IconButton(
+                                                                          icon: Icon(Icons.close, size: 20),
+                                                                          onPressed: () {
+                                                                            setState(() {
+                                                                              (task['notes'] as List<String>?)?.removeAt(index);
+                                                                            });
+                                                                          },
+                                                                          padding: EdgeInsets.zero,
+                                                                          constraints: BoxConstraints(
+                                                                            minWidth: 36,
+                                                                            minHeight: 36,
+                                                                          ),
+                                                                          splashRadius: 20,
                                                                         ),
                                                                       ),
                                                                     ],
                                                                   ),
-                                                                );
-                                                              }).toList(),
+                                                                ),
+                                                              ),
                                                             ],
-                                                          ),
-                                                        ],
-                                                        SizedBox(height: 8),
-                                                        Row(
-                                                          children: [
+                                                            SizedBox(height: 8),
                                                             TextButton.icon(
-                                                              onPressed: () => _addDocument(task),
-                                                              icon: Image.asset(
-                                                                'assets/images/document_icon.png',
-                                                                width: 24,
-                                                                height: 24,
-                                                                color: Theme.of(context).primaryColor,
-                                                              ),
-                                                              label: Text('Add Document'),
-                                                              style: TextButton.styleFrom(
-                                                                foregroundColor: Theme.of(context).primaryColor,
-                                                              ),
-                                                            ),
-                                                            SizedBox(width: 16),
-                                                            TextButton.icon(
-                                                              onPressed: () => _addVoiceNote(task),
-                                                              icon: Image.asset(
-                                                                'assets/images/microphone.png',
-                                                                width: 24,
-                                                                height: 24,
-                                                                color: Theme.of(context).primaryColor,
-                                                              ),
-                                                              label: Text('Add Voice Note'),
+                                                              onPressed: () {
+                                                                setState(() {
+                                                                  if (task['notes'] == null) {
+                                                                    task['notes'] = <String>[];
+                                                                  }
+                                                                  (task['notes'] as List<String>).add('');
+                                                                });
+                                                              },
+                                                              icon: Icon(Icons.add),
+                                                              label: Text('Add Note'),
                                                               style: TextButton.styleFrom(
                                                                 foregroundColor: Theme.of(context).primaryColor,
                                                               ),
                                                             ),
                                                           ],
                                                         ),
+                                                        SizedBox(height: 16),
+                                                        // Documents section
+                                                        Column(
+                                                          crossAxisAlignment: CrossAxisAlignment.start,
+                                                          children: [
+                                                            if ((task['documents'] as List<Map<String, dynamic>>?)?.isNotEmpty ?? false) ...[
+                                                              Text(
+                                                                'Documents',
+                                                                style: TextStyle(
+                                                                  fontSize: 16,
+                                                                  fontWeight: FontWeight.w500,
+                                                                ),
+                                                              ),
+                                                              SizedBox(height: 8),
+                                                              Wrap(
+                                                                spacing: 8,
+                                                                runSpacing: 8,
+                                                                children: [
+                                                                  ...(task['documents'] as List<Map<String, dynamic>>).map((doc) {
+                                                                    return Container(
+                                                                      width: 100,
+                                                                      child: Column(
+                                                                        children: [
+                                                                          Stack(
+                                                                            children: [
+                                                                              Container(
+                                                                                width: 80,
+                                                                                height: 80,
+                                                                                decoration: BoxDecoration(
+                                                                                  color: Colors.grey.withOpacity(0.1),
+                                                                                  borderRadius: BorderRadius.circular(8),
+                                                                                ),
+                                                                                child: InkWell(
+                                                                                  onTap: () => _openDocument(doc),
+                                                                                  child: Image.asset(
+                                                                                    TopPrioritiesModel.getDocumentTypeIcon(doc['mimeType']),
+                                                                                    width: 40,
+                                                                                    height: 40,
+                                                                                  ),
+                                                                                ),
+                                                                              ),
+                                                                              Positioned(
+                                                                                right: 0,
+                                                                                top: 0,
+                                                                                child: IconButton(
+                                                                                  icon: Icon(Icons.close, size: 16, color: Colors.red),
+                                                                                  onPressed: () async {
+                                                                                    try {
+                                                                                      // Delete from storage first
+                                                                                      if (doc['wasabi_path'] != null) {
+                                                                                        await StorageService.deleteFile(doc['url']);
+                                                                                      }
+                                                                                      // Then remove from UI
+                                                                                      setState(() {
+                                                                                        (task['documents'] as List).remove(doc);
+                                                                                      });
+                                                                                    } catch (e) {
+                                                                                      print('Error deleting document: $e');
+                                                                                      if (!mounted) return;
+                                                                                      ScaffoldMessenger.of(context).showSnackBar(
+                                                                                        SnackBar(content: Text('Error deleting document: $e')),
+                                                                                      );
+                                                                                    }
+                                                                                  },
+                                                                                  padding: EdgeInsets.zero,
+                                                                                  constraints: BoxConstraints(
+                                                                                    minWidth: 24,
+                                                                                    minHeight: 24,
+                                                                                  ),
+                                                                                  splashRadius: 16,
+                                                                                ),
+                                                                              ),
+                                                                            ],
+                                                                          ),
+                                                                          SizedBox(height: 4),
+                                                                          Text(
+                                                                            doc['name'] as String,
+                                                                            maxLines: 2,
+                                                                            overflow: TextOverflow.ellipsis,
+                                                                            textAlign: TextAlign.center,
+                                                                            style: TextStyle(
+                                                                              fontSize: 12,
+                                                                            ),
+                                                                          ),
+                                                                        ],
+                                                                      ),
+                                                                    );
+                                                                  }).toList(),
+                                                                ],
+                                                              ),
+                                                            ],
+                                                            SizedBox(height: 8),
+                                                            Row(
+                                                              children: [
+                                                                TextButton.icon(
+                                                                  onPressed: () => _addDocument(task),
+                                                                  icon: Image.asset(
+                                                                    'assets/images/document_icon.png',
+                                                                    width: 24,
+                                                                    height: 24,
+                                                                    color: Theme.of(context).primaryColor,
+                                                                  ),
+                                                                  label: Text('Add Document'),
+                                                                  style: TextButton.styleFrom(
+                                                                    foregroundColor: Theme.of(context).primaryColor,
+                                                                  ),
+                                                                ),
+                                                                SizedBox(width: 16),
+                                                                TextButton.icon(
+                                                                  onPressed: () => _addVoiceNote(task),
+                                                                  icon: Image.asset(
+                                                                    'assets/images/microphone.png',
+                                                                    width: 24,
+                                                                    height: 24,
+                                                                    color: Theme.of(context).primaryColor,
+                                                                  ),
+                                                                  label: Text('Add Voice Note'),
+                                                                  style: TextButton.styleFrom(
+                                                                    foregroundColor: Theme.of(context).primaryColor,
+                                                                  ),
+                                                                ),
+                                                              ],
+                                                            ),
+                                                          ],
+                                                        ),
+                                                        SizedBox(height: 16),
+                                                        // Action buttons row
+                                                        Row(
+                                                          children: [
+                                                            IconButton(
+                                                              icon: Icon(
+                                                                task['reminderTime'] != null ? Icons.alarm_on : Icons.alarm_add,
+                                                                color: task['reminderTime'] != null
+                                                                    ? Theme.of(context).primaryColor
+                                                                    : Colors.grey,
+                                                              ),
+                                                              onPressed: () => _selectTaskReminderTime(context, task['id']),
+                                                            ),
+                                                            Spacer(),
+                                                            TextButton(
+                                                              onPressed: () {
+                                                                setState(() {
+                                                                  // Restore original state
+                                                                  if (task['_originalState'] != null) {
+                                                                    task['description'] = task['_originalState']['description'];
+                                                                    task['notes'] = task['_originalState']['notes'];
+                                                                    task['metadata'] = Map<String, dynamic>.from(task['_originalState']['metadata']);
+                                                                    task['_originalState'] = null;
+                                                                  }
+                                                                  task['isExpanded'] = false;
+                                                                });
+                                                              },
+                                                              style: TextButton.styleFrom(
+                                                                foregroundColor: Theme.of(context).brightness == Brightness.dark
+                                                                    ? Colors.white70
+                                                                    : Colors.grey.shade700,
+                                                              ),
+                                                              child: Text('Cancel'),
+                                                            ),
+                                                            SizedBox(width: 8),
+                                                            ElevatedButton(
+                                                              onPressed: () {
+                                                                setState(() {
+                                                                  task['isExpanded'] = false;
+                                                                  // Only save if we're in edit mode (card exists)
+                                                                  if (widget.isEditing) {
+                                                                    _saveChanges();
+                                                                  }
+                                                                });
+                                                              },
+                                                              style: ElevatedButton.styleFrom(
+                                                                backgroundColor: Theme.of(context).primaryColor,
+                                                                foregroundColor: Colors.white,
+                                                              ),
+                                                              child: Text('Done'),
+                                                            ),
+                                                          ],
+                                                        ),
                                                       ],
                                                     ),
-                                                    SizedBox(height: 16),
-                                                    // Action buttons row
-                                                    Row(
-                                                      children: [
-                                                        IconButton(
-                                                          icon: Icon(
-                                                            task['reminderTime'] != null ? Icons.alarm_on : Icons.alarm_add,
-                                                            color: task['reminderTime'] != null
-                                                                ? Theme.of(context).primaryColor
-                                                                : Colors.grey,
-                                                          ),
-                                                          onPressed: () => _selectTaskReminderTime(context, task['id']),
-                                                        ),
-                                                        Spacer(),
-                                                        TextButton(
-                                                          onPressed: () {
-                                                            setState(() {
-                                                              // Restore original state
-                                                              if (task['_originalState'] != null) {
-                                                                task['description'] = task['_originalState']['description'];
-                                                                task['notes'] = task['_originalState']['notes'];
-                                                                task['metadata'] = Map<String, dynamic>.from(task['_originalState']['metadata']);
-                                                                task['_originalState'] = null;
-                                                              }
-                                                              task['isExpanded'] = false;
-                                                            });
-                                                          },
-                                                          style: TextButton.styleFrom(
-                                                            foregroundColor: Theme.of(context).brightness == Brightness.dark
-                                                                ? Colors.white70
-                                                                : Colors.grey.shade700,
-                                                          ),
-                                                          child: Text('Cancel'),
-                                                        ),
-                                                        SizedBox(width: 8),
-                                                        ElevatedButton(
-                                                          onPressed: () {
-                                                            setState(() {
-                                                              task['isExpanded'] = false;
-                                                              // Only save if we're in edit mode (card exists)
-                                                              if (widget.isEditing) {
-                                                                _saveChanges();
-                                                              }
-                                                            });
-                                                          },
-                                                          style: ElevatedButton.styleFrom(
-                                                            backgroundColor: Theme.of(context).primaryColor,
-                                                            foregroundColor: Colors.white,
-                                                          ),
-                                                          child: Text('Done'),
-                                                        ),
-                                                      ],
-                                                    ),
-                                                  ],
-                                                ),
+                                                  ),
+                                                ],
                                               ),
-                                            ],
+                                            ),
                                           ),
                                         ),
                                       ),
-                                    ),
+                                    );
+                                  },
+                                ),
+                              ],
+                            ),
+                          ),
+                    ),
+                    // Bottom button for editing mode
+                    if (widget.isEditing)
+                      Padding(
+                        padding: const EdgeInsets.all(16.0),
+                        child: SizedBox(
+                          width: double.infinity,
+                          child: ElevatedButton(
+                            style: ElevatedButton.styleFrom(
+                              padding: EdgeInsets.symmetric(vertical: 16),
+                              backgroundColor: Theme.of(context).primaryColor,
+                            ),
+                            onPressed: _isLoading ? null : _saveChanges,
+                            child: _isLoading
+                              ? SizedBox(
+                                  height: 20,
+                                  width: 20,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
                                   ),
-                                );
-                              },
-                            ),
-                          ],
+                                )
+                              : Text(
+                                  'Save Changes',
+                                  style: TextStyle(fontSize: 16),
+                                ),
+                          ),
                         ),
                       ),
-                ),
-                // Bottom button for editing mode
-                if (widget.isEditing)
-                  Padding(
-                    padding: const EdgeInsets.all(16.0),
-                    child: SizedBox(
-                      width: double.infinity,
-                      child: ElevatedButton(
-                        style: ElevatedButton.styleFrom(
-                          padding: EdgeInsets.symmetric(vertical: 16),
-                          backgroundColor: Theme.of(context).primaryColor,
-                        ),
-                        onPressed: _isLoading ? null : _saveChanges,
-                        child: _isLoading
-                          ? SizedBox(
-                              height: 20,
-                              width: 20,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
-                              ),
-                            )
-                          : Text(
-                              'Save Changes',
-                              style: TextStyle(fontSize: 16),
-                            ),
-                      ),
-                    ),
-                  ),
-              ],
-            ),
-            bottomNavigationBar: !widget.isEditing ? BottomAppBar(
-              shape: CircularNotchedRectangle(),
-              notchMargin: 8,
-              color: themeProvider.isDarkMode ? Colors.grey[900] : Colors.white,
-              elevation: themeProvider.isDarkMode ? 0 : 8,
-              height: 60,
-              child: Container(
-                height: 60,
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceAround,
-                  children: [
-                    Expanded(
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          IconButton(
-                            icon: Image.asset(
-                              'assets/images/cancel.png',
-                              width: 24,
-                              height: 24,
-                              color: themeProvider.isDarkMode ? Colors.white70 : Colors.grey.shade600,
-                            ),
-                            onPressed: () => Navigator.of(context).pop(),
-                            tooltip: 'Cancel',
-                            padding: EdgeInsets.symmetric(vertical: 8),
-                          ),
-                        ],
-                      ),
-                    ),
-                    SizedBox(width: 80),
-                    Expanded(
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          IconButton(
-                            icon: Image.asset(
-                              'assets/images/card.png',
-                              width: 24,
-                              height: 24,
-                              color: Colors.green,
-                            ),
-                            onPressed: _isLoading ? null : _createCard,
-                            tooltip: 'Create Card',
-                            padding: EdgeInsets.symmetric(vertical: 8),
-                          ),
-                        ],
-                      ),
-                    ),
                   ],
                 ),
-              ),
-            ) : null,
-            floatingActionButton: !widget.isEditing ? Container(
-              height: 80,
-              width: 80,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: Colors.transparent,
-                boxShadow: [
-                  BoxShadow(
-                    color: Theme.of(context).primaryColor.withOpacity(0.3),
-                    spreadRadius: 2,
-                    blurRadius: 10,
-                    offset: Offset(0, 0),
+                bottomNavigationBar: !widget.isEditing ? BottomAppBar(
+                  shape: CircularNotchedRectangle(),
+                  notchMargin: 8,
+                  color: themeProvider.isDarkMode ? Colors.grey[900] : Colors.white,
+                  elevation: themeProvider.isDarkMode ? 0 : 8,
+                  height: 60,
+                  child: Container(
+                    height: 60,
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceAround,
+                      children: [
+                        Expanded(
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              IconButton(
+                                icon: Image.asset(
+                                  'assets/images/cancel.png',
+                                  width: 24,
+                                  height: 24,
+                                  color: themeProvider.isDarkMode ? Colors.white70 : Colors.grey.shade600,
+                                ),
+                                onPressed: () => Navigator.of(context).pop(),
+                                tooltip: 'Cancel',
+                                padding: EdgeInsets.symmetric(vertical: 8),
+                              ),
+                            ],
+                          ),
+                        ),
+                        SizedBox(width: 80),
+                        Expanded(
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              IconButton(
+                                icon: Image.asset(
+                                  'assets/images/card.png',
+                                  width: 24,
+                                  height: 24,
+                                  color: Colors.green,
+                                ),
+                                onPressed: _isLoading ? null : _createCard,
+                                tooltip: 'Create Card',
+                                padding: EdgeInsets.symmetric(vertical: 8),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
-                ],
-              ),
-              child: FloatingActionButton(
-                onPressed: () {
-                  setState(() {
-                    final newTaskIndex = _tasks.length;
-                    _tasks.add(TopPrioritiesModel.createDefaultTask(newTaskIndex));
-                    _initializeTextControllers();
-                  });
-                },
-                backgroundColor: Theme.of(context).primaryColor,
-                child: Image.asset(
-                  'assets/images/magic.png',
-                  color: Colors.white,
-                  width: 42,
-                  height: 42,
-                ),
-                elevation: 4.0,
-                tooltip: 'Add New Priority',
-                shape: CircleBorder(),
-              ),
-            ) : null,
-            floatingActionButtonLocation: !widget.isEditing ? FloatingActionButtonLocation.centerDocked : null,
+                ) : null,
+                floatingActionButton: !widget.isEditing ? Container(
+                  height: 80,
+                  width: 80,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: Colors.transparent,
+                    boxShadow: [
+                      BoxShadow(
+                        color: Theme.of(context).primaryColor.withOpacity(0.3),
+                        spreadRadius: 2,
+                        blurRadius: 10,
+                        offset: Offset(0, 0),
+                      ),
+                    ],
+                  ),
+                  child: FloatingActionButton(
+                    onPressed: () {
+                      setState(() {
+                        final newTaskIndex = _tasks.length;
+                        _tasks.add(TopPrioritiesModel.createDefaultTask(newTaskIndex));
+                        _initializeTextControllers();
+                      });
+                    },
+                    backgroundColor: Theme.of(context).primaryColor,
+                    child: Image.asset(
+                      'assets/images/magic.png',
+                      color: Colors.white,
+                      width: 42,
+                      height: 42,
+                    ),
+                    elevation: 4.0,
+                    tooltip: 'Add New Priority',
+                    shape: CircleBorder(),
+                  ),
+                ) : null,
+                floatingActionButtonLocation: !widget.isEditing ? FloatingActionButtonLocation.centerDocked : null,
+              );
+            },
           ),
         ],
       ),
@@ -857,7 +929,7 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
     }
   }
 
-  void _selectDate(DateTime date) async {
+  Future<void> _selectDate(DateTime date) async {
     // First update the date immediately to make UI responsive
     setState(() {
       _selectedDate = date;
@@ -1166,6 +1238,21 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
 
   Future<void> _addDocument(Map<String, dynamic> task) async {
     try {
+      // First ensure the task is saved
+      if (!widget.isEditing || task['id'] == null) {
+        // Generate an ID for the task if it doesn't have one
+        if (task['id'] == null) {
+          task['id'] = const Uuid().v4();
+        }
+        await _saveChanges();
+      } else {
+        // For existing tasks, ensure it exists in the database
+        final taskExists = await TopPrioritiesService.checkTaskExists(task['id']);
+        if (!taskExists) {
+          await TopPrioritiesService.savePriorityEntry(_selectedDate, task);
+        }
+      }
+
       final result = await FilePicker.platform.pickFiles(
         type: FileType.custom,
         allowedExtensions: ['jpg', 'jpeg', 'png', 'gif', 'mp3', 'wav', 'pdf', 'doc', 'docx'],
@@ -1204,51 +1291,59 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
           return;
         }
 
-        // Show dialog to get document name
-        final name = await showDialog<String>(
+        // Show loading indicator
+        if (!mounted) return;
+        showDialog(
           context: context,
-          builder: (context) => AlertDialog(
-            title: Text('Document Name'),
-            content: TextField(
-              autofocus: true,
-              maxLength: TopPrioritiesModel.maxDocumentNameLength,
-              decoration: InputDecoration(
-                hintText: 'Enter document name',
-                counterText: '',
-              ),
-              controller: TextEditingController(text: fileName),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(context),
-                child: Text('Cancel'),
-              ),
-              TextButton(
-                onPressed: () => Navigator.pop(context, fileName),
-                child: Text('OK'),
-              ),
-            ],
-          ),
+          barrierDismissible: false,
+          builder: (context) => Center(child: CircularProgressIndicator()),
         );
 
-        if (name != null) {
-          // Upload file to storage and get URL
-          final result = await _uploadFile(File(file.path!), 'documents');
-          
+        try {
+          // Upload the file using AttachmentService
+          final attachmentType = mimeType.startsWith('image/') ? 'image' : 'document';
+          final uploadResult = await AttachmentService.uploadAttachment(
+            filePath: file.path!,
+            fileName: fileName,
+            mimeType: mimeType,
+            sizeBytes: file.size,
+            attachmentType: attachmentType,
+            todoEntryId: task['id'],
+            metadata: {
+              'todo_entry_title': task['description'],
+              'todo_entry_date': _selectedDate.toIso8601String(),
+              'uploaded_at': DateTime.now().toIso8601String(),
+            },
+          );
+
+          // Update the UI
           setState(() {
             if (task['documents'] == null) {
-              task['documents'] = <Map<String, dynamic>>[];
+              task['documents'] = [];
             }
-            (task['documents'] as List<Map<String, dynamic>>).add({
-              'id': _uuid.v4(),
-              'name': name,
-              'url': result['url'],
-              'wasabi_path': result['wasabi_path'],
-              'mimeType': mimeType,
-              'size': file.size,
-              'uploadedAt': DateTime.now().toIso8601String(),
+            task['documents'].add({
+              'id': uploadResult['id'],
+              'url': uploadResult['url'],
+              'wasabi_path': uploadResult['wasabi_path'],
+              'mime_type': uploadResult['mime_type'],
+              'name': fileName,
+              'todo_entry_id': task['id'],
             });
           });
+
+          // Close loading indicator
+          if (!mounted) return;
+          Navigator.pop(context);
+        } catch (e) {
+          // Close loading indicator
+          if (!mounted) return;
+          Navigator.pop(context);
+          
+          // Show error
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Failed to upload file: $e')),
+          );
         }
       }
     } catch (e) {
@@ -1260,21 +1355,11 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
     }
   }
 
-  Future<Map<String, String>> _uploadFile(File fileToUpload, String directory) async {
-    try {
-      final result = await StorageService.uploadFile(fileToUpload, directory);
-      return result;
-    } catch (e) {
-      print('Error uploading file: $e');
-      rethrow;
-    }
-  }
-
   Future<void> _openDocument(Map<String, dynamic> doc) async {
     try {
       final signedUrl = await StorageService.getSignedUrl(doc['wasabi_path']);
       
-      if (doc['mimeType'].startsWith('image/')) {
+      if (doc['mime_type'].startsWith('image/')) {
         // Show image in dialog using the signed URL
         if (!mounted) return;
         showDialog(
@@ -1283,7 +1368,7 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
             child: Image.network(signedUrl),
           ),
         );
-      } else if (doc['mimeType'].contains('pdf')) {
+      } else if (doc['mime_type'].contains('pdf')) {
         // For PDFs, open directly in browser/system viewer
         if (await canLaunch(signedUrl)) {
           await launch(signedUrl);
@@ -1309,21 +1394,139 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
 
   Future<void> _addVoiceNote(Map<String, dynamic> task) async {
     try {
-      final result = await StorageService.recordAndUploadVoiceNote(context);
+      // First ensure the task is saved
+      if (!widget.isEditing || task['id'] == null) {
+        // Generate an ID for the task if it doesn't have one
+        if (task['id'] == null) {
+          task['id'] = const Uuid().v4();
+        }
+        await _saveChanges();
+      } else {
+        // For existing tasks, ensure it exists in the database
+        final taskExists = await TopPrioritiesService.checkTaskExists(task['id']);
+        if (!taskExists) {
+          await TopPrioritiesService.savePriorityEntry(_selectedDate, task);
+        }
+      }
+
+      final record = AudioRecorderService.instance;
       
-      if (result != null) {
-        setState(() {
-          if (task['documents'] == null) {
-            task['documents'] = <Map<String, dynamic>>[];
+      if (await record.hasPermission()) {
+        // Get temp directory for saving recording
+        final tempDir = await getTemporaryDirectory();
+        final tempPath = '${tempDir.path}/voice_note_${DateTime.now().millisecondsSinceEpoch}.m4a';
+        
+        // Start recording
+        await record.start(
+          path: tempPath,
+          encoder: AudioEncoder.aacLc,
+          bitRate: 128000,
+          samplingRate: 44100,
+        );
+        
+        // Show recording dialog
+        if (!mounted) return;
+        final shouldStop = await showDialog<bool>(
+          context: context,
+          barrierDismissible: false,
+          builder: (context) => AlertDialog(
+            title: Text('Recording Voice Note'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CircularProgressIndicator(),
+                SizedBox(height: 16),
+                Text('Recording in progress...'),
+                SizedBox(height: 16),
+                Text('Tap Stop when finished'),
+                SizedBox(height: 16),
+                ElevatedButton(
+                  onPressed: () => Navigator.pop(context, true),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.red,
+                  ),
+                  child: Text('Stop Recording'),
+                ),
+              ],
+            ),
+          ),
+        );
+        
+        if (shouldStop == true) {
+          // Stop recording
+          final path = await record.stop();
+          
+          if (path != null) {
+            // Show uploading dialog
+            if (!mounted) return;
+            showDialog(
+              context: context,
+              barrierDismissible: false,
+              builder: (context) => AlertDialog(
+                title: Text('Uploading Voice Note'),
+                content: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    CircularProgressIndicator(),
+                    SizedBox(height: 16),
+                    Text('Please wait...'),
+                  ],
+                ),
+              ),
+            );
+
+            try {
+              // Upload using AttachmentService
+              final uploadResult = await AttachmentService.uploadAttachment(
+                filePath: path,
+                fileName: 'Voice Note ${DateTime.now().toString()}',
+                mimeType: 'audio/mpeg',
+                sizeBytes: await File(path).length(),
+                attachmentType: 'audio',
+                todoEntryId: task['id'],
+                metadata: {
+                  'todo_entry_title': task['description'],
+                  'todo_entry_date': _selectedDate.toIso8601String(),
+                  'uploaded_at': DateTime.now().toIso8601String(),
+                },
+              );
+
+              // Update UI
+              setState(() {
+                if (task['documents'] == null) {
+                  task['documents'] = [];
+                }
+                task['documents'].add({
+                  'id': uploadResult['id'],
+                  'url': uploadResult['url'],
+                  'wasabi_path': uploadResult['wasabi_path'],
+                  'mime_type': uploadResult['mime_type'],
+                  'name': 'Voice Note ${DateTime.now().toString()}',
+                  'todo_entry_id': task['id'],
+                });
+              });
+
+              // Close uploading dialog
+              if (!mounted) return;
+              Navigator.pop(context);
+            } catch (e) {
+              // Close uploading dialog
+              if (!mounted) return;
+              Navigator.pop(context);
+              
+              // Show error
+              if (!mounted) return;
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text('Failed to upload voice note: $e')),
+              );
+            }
           }
-          (task['documents'] as List<Map<String, dynamic>>).add({
-            'id': _uuid.v4(),
-            'name': 'Voice Note ${DateFormat('MMM d, y HH:mm').format(DateTime.now())}',
-            'url': result['url']!,
-            'mimeType': result['mimeType']!,
-            'uploadedAt': DateTime.now().toIso8601String(),
-          });
-        });
+        }
+      } else {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Microphone permission denied')),
+        );
       }
     } catch (e) {
       print('Error recording voice note: $e');

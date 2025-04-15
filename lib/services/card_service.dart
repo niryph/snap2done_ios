@@ -6,6 +6,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'dart:convert';
 import '../models/card_model.dart';
 import '../models/task_model.dart';
+import '../services/auth_service.dart';
 
 class CardService {
   // Singleton pattern
@@ -18,29 +19,40 @@ class CardService {
   // Stream controller to notify listeners when cards change
   static final _cardStreamController = StreamController<List<CardModel>>.broadcast();
   static Stream<List<CardModel>> get cardStream => _cardStreamController.stream;
+  static List<CardModel> _cards = [];
   
-  // Get all cards with their tasks
+  static void _notifyListeners() {
+    print('[CardService] Notifying listeners with ${_cards.length} cards');
+    print('[CardService] Current cards: ${_cards.map((c) => '${c.id}: ${c.metadata?['type']}')}');
+    _cardStreamController.add(_cards);
+  }
+  
+  // Get all cards with their todo entries
   static Future<List<CardModel>> getCards() async {
+    debugPrint('[CardService] Fetching all cards...');
     try {
-      // Fetch cards
-      final cardsResponse = await _client
+      final response = await _client
           .from('cards')
           .select()
+          .eq('user_id', AuthService.currentUser?.id ?? '')
           .order('created_at', ascending: false);
       
-      final List<CardModel> cards = List<Map<String, dynamic>>.from(cardsResponse)
-          .map((map) => CardModel.fromMap(map))
+      _cards = (response as List)
+          .map((card) => CardModel.fromMap(card))
           .toList();
       
-      // Fetch tasks for each card
-      for (var card in cards) {
-        final tasksResponse = await _client
-            .from('tasks')
+      debugPrint('[CardService] Fetched ${_cards.length} cards');
+      debugPrint('[CardService] Card types: ${_cards.map((c) => '${c.id}: ${c.metadata?['type']}')}');
+      
+      // Fetch todo entries for each card
+      for (var card in _cards) {
+        final todoEntriesResponse = await _client
+            .from('todo_entries')
             .select()
             .eq('card_id', card.id)
             .order('position', ascending: true);
         
-        card.tasks = List<Map<String, dynamic>>.from(tasksResponse)
+        card.tasks = List<Map<String, dynamic>>.from(todoEntriesResponse)
             .map((map) => TaskModel.fromMap(map))
             .toList();
         
@@ -48,18 +60,16 @@ class CardService {
         card.taskCount = card.tasks.length;
       }
       
-      // Notify listeners
-      _cardStreamController.add(cards);
-      
-      return cards;
+      _notifyListeners();
+      return _cards;
     } catch (e) {
-      debugPrint('Error fetching cards: $e');
+      debugPrint('[CardService] Error fetching cards: $e');
       // Return empty list for now to avoid breaking the UI
       return [];
     }
   }
   
-  // Create a new card with tasks
+  // Create a new card with todo entries
   static Future<CardModel> createCard(Map<String, dynamic> cardData, {bool notifyListeners = true}) async {
     try {
       // Get current user ID
@@ -77,9 +87,10 @@ class CardService {
       
       debugPrint('Card has ${tasksData.length} tasks');
       
-      // Remove tasks from card data as they will be inserted separately
+      // Remove tasks and type from card data as they will be inserted separately
       final cardDataWithoutTasks = Map<String, dynamic>.from(cardData);
       cardDataWithoutTasks.remove('tasks');
+      cardDataWithoutTasks.remove('type'); // Remove type as it's stored in metadata
 
       // Add user_id to card data
       cardDataWithoutTasks['user_id'] = userId;
@@ -130,25 +141,26 @@ class CardService {
       // Convert response to CardModel
       final card = CardModel.fromMap(response);
 
-      // Insert tasks if any
+      // Insert todo entries if any
       if (tasksData.isNotEmpty) {
-        debugPrint('Inserting ${tasksData.length} tasks for card ${card.id}');
+        debugPrint('Inserting ${tasksData.length} todo entries for card ${card.id}');
         
-        final tasksToInsert = tasksData.map((task) => {
+        final todoEntriesToInsert = tasksData.map((task) => {
           ...task,
           'card_id': card.id,
+          'user_id': userId,
           'created_at': DateTime.now().toIso8601String(),
           'updated_at': DateTime.now().toIso8601String(),
         }).toList();
 
-        final tasksResponse = await _client
-            .from('tasks')
-            .insert(tasksToInsert)
+        final todoEntriesResponse = await _client
+            .from('todo_entries')
+            .insert(todoEntriesToInsert)
             .select();
         
-        debugPrint('Tasks inserted successfully: ${tasksResponse.length} tasks');
+        debugPrint('Todo entries inserted successfully: ${todoEntriesResponse.length} entries');
 
-        card.tasks = List<Map<String, dynamic>>.from(tasksResponse)
+        card.tasks = List<Map<String, dynamic>>.from(todoEntriesResponse)
             .map((map) => TaskModel.fromMap(map))
             .toList();
       } else {
@@ -158,8 +170,8 @@ class CardService {
       // Notify listeners only if requested
       if (notifyListeners) {
         debugPrint('Notifying listeners about new card');
-        final cards = await getCards();
-        _cardStreamController.add(cards);
+        // Fetch and notify with all cards
+        await getCards();
       } else {
         debugPrint('Skipping listener notification for new card');
       }
@@ -171,7 +183,7 @@ class CardService {
     }
   }
   
-  // Update an existing card and its tasks
+  // Update an existing card and its todo entries
   static Future<CardModel> updateCard(Map<String, dynamic> cardData) async {
     try {
       final cardId = cardData['id'];
@@ -206,134 +218,49 @@ class CardService {
         debugPrint('Updating card with metadata: ${cardData['metadata']}');
       }
       
-      // Update card
-      final cardResponse = await _client
+      // Update card in database
+      final response = await _client
           .from('cards')
           .update(cardDbData)
           .eq('id', cardId)
           .select()
           .single();
       
-      // Create card model
-      final card = CardModel.fromMap(cardResponse);
+      // Convert response to CardModel
+      final card = CardModel.fromMap(response);
       
-      // Get existing tasks
-      final existingTasksResponse = await _client
-          .from('tasks')
-          .select()
-          .eq('card_id', cardId);
-      
-      final List<TaskModel> existingTasks = List<Map<String, dynamic>>.from(existingTasksResponse)
-          .map((map) => TaskModel.fromMap(map))
-          .toList();
-      
-      // Create a map of existing tasks by ID for easy lookup
-      final Map<String, TaskModel> existingTasksMap = {};
-      for (var task in existingTasks) {
-        existingTasksMap[task.id] = task;
-      }
-      
-      // Process tasks
+      // Update todo entries
       if (tasksData.isNotEmpty) {
-        final List<Map<String, dynamic>> tasksToInsert = [];
-        final List<Map<String, dynamic>> tasksToUpdate = [];
-        final Set<String> processedTaskIds = {};
-        
-        for (int i = 0; i < tasksData.length; i++) {
-          final task = tasksData[i];
-          
-          // Extract priority from description if needed
-          String priority = 'medium';
-          if (task.containsKey('description') && 
-              task['description'] is String && 
-              task['description'].toString().contains('Priority:')) {
-            final priorityMatch = RegExp(r'Priority:\s*(\w+)').firstMatch(task['description']);
-            if (priorityMatch != null && priorityMatch.groupCount >= 1) {
-              priority = priorityMatch.group(1)!.toLowerCase();
-            }
-          } else if (task.containsKey('priority')) {
-            priority = task['priority'];
-          }
-          
-          // Check if task has an ID and exists
-          if (task.containsKey('id') && task['id'] != null && existingTasksMap.containsKey(task['id'])) {
-            // Update existing task
-            tasksToUpdate.add({
-              'id': task['id'],
-              'description': task['title'] ?? 'Task ${i + 1}',
-              'is_completed': task['isCompleted'] ?? false,
-              'priority': priority,
-              'notes': task['description'] ?? null,
-              'position': i,
-              'updated_at': DateTime.now().toIso8601String(),
-            });
-            
-            processedTaskIds.add(task['id']);
-          } else {
-            // Insert new task
-            tasksToInsert.add({
-              'card_id': cardId,
-              'description': task['title'] ?? 'Task ${i + 1}',
-              'is_completed': task['isCompleted'] ?? false,
-              'priority': priority,
-              'notes': task['description'] ?? null,
-              'position': i,
-            });
-          }
-        }
-        
-        // Delete tasks that are no longer in the list
-        final tasksToDelete = existingTasks
-            .where((task) => !processedTaskIds.contains(task.id))
-            .map((task) => task.id)
-            .toList();
-        
-        if (tasksToDelete.isNotEmpty) {
-          // Delete tasks one by one since in_ method is not available
-          for (final taskId in tasksToDelete) {
-            await _client
-                .from('tasks')
-                .delete()
-                .eq('id', taskId);
-          }
-        }
-        
-        // Update existing tasks
-        if (tasksToUpdate.isNotEmpty) {
-          for (var task in tasksToUpdate) {
-            await _client
-                .from('tasks')
-                .update(task)
-                .eq('id', task['id']);
-          }
-        }
-        
-        // Insert new tasks
-        if (tasksToInsert.isNotEmpty) {
-          await _client
-              .from('tasks')
-              .insert(tasksToInsert);
-        }
-        
-        // Fetch updated tasks
-        final updatedTasksResponse = await _client
-            .from('tasks')
-            .select()
-            .eq('card_id', cardId)
-            .order('position', ascending: true);
-        
-        card.tasks = List<Map<String, dynamic>>.from(updatedTasksResponse)
-            .map((map) => TaskModel.fromMap(map))
-            .toList();
-      } else {
-        // Delete all tasks if the new task list is empty
+        // First, delete existing todo entries for this card
         await _client
-            .from('tasks')
+            .from('todo_entries')
             .delete()
             .eq('card_id', cardId);
         
+        // Then insert new todo entries
+        final todoEntriesToInsert = tasksData.map((task) => {
+          ...task,
+          'card_id': cardId,
+          'user_id': _client.auth.currentUser?.id,
+          'created_at': DateTime.now().toIso8601String(),
+          'updated_at': DateTime.now().toIso8601String(),
+        }).toList();
+
+        final todoEntriesResponse = await _client
+            .from('todo_entries')
+            .insert(todoEntriesToInsert)
+            .select();
+        
+        card.tasks = List<Map<String, dynamic>>.from(todoEntriesResponse)
+            .map((map) => TaskModel.fromMap(map))
+            .toList();
+      } else {
         card.tasks = [];
       }
+      
+      // Notify listeners
+      final cards = await getCards();
+      _cardStreamController.add(cards);
       
       return card;
     } catch (e) {
@@ -342,12 +269,12 @@ class CardService {
     }
   }
   
-  // Delete a card and its tasks
+  // Delete a card and its todo entries
   static Future<void> deleteCard(String id) async {
     try {
-      // Delete tasks first (foreign key constraint)
+      // Delete todo entries first (foreign key constraint)
       await _client
-          .from('tasks')
+          .from('todo_entries')
           .delete()
           .eq('card_id', id);
       
@@ -379,7 +306,7 @@ class CardService {
       
       // Update the task
       await _client
-          .from('tasks')
+          .from('todo_entries')
           .update({
             'is_completed': isCompleted,
             'updated_at': DateTime.now().toIso8601String(),
@@ -390,7 +317,7 @@ class CardService {
       
       // Get all tasks for the card to calculate progress
       final tasksResponse = await _client
-          .from('tasks')
+          .from('todo_entries')
           .select()
           .eq('card_id', cardId);
       
@@ -455,7 +382,7 @@ class CardService {
       
       // Get tasks for the card
       final tasksResponse = await _client
-          .from('tasks')
+          .from('todo_entries')
           .select()
           .eq('card_id', cardId)
           .order('position', ascending: true);
@@ -480,7 +407,7 @@ class CardService {
       
       // Update the task's reminder_date field
       await _client
-          .from('tasks')
+          .from('todo_entries')
           .update({
             'reminder_date': reminderDate.toIso8601String(),
             'updated_at': DateTime.now().toIso8601String(),
@@ -497,7 +424,7 @@ class CardService {
           .single();
       
       final tasksResponse = await _client
-          .from('tasks')
+          .from('todo_entries')
           .select()
           .eq('card_id', cardId)
           .order('position', ascending: true);
@@ -589,7 +516,7 @@ class CardService {
       
       // Fetch tasks for the card
       final tasksResponse = await _client
-          .from('tasks')
+          .from('todo_entries')
           .select()
           .eq('card_id', cardId)
           .order('position', ascending: true);
@@ -616,7 +543,7 @@ class CardService {
       debugPrint('Deleting task: $taskId');
       
       await _client
-          .from('tasks')
+          .from('todo_entries')
           .delete()
           .eq('id', taskId);
       
@@ -625,5 +552,12 @@ class CardService {
       debugPrint('Error deleting task: $e');
       rethrow;
     }
+  }
+
+  static CardModel? getCard(String cardId) {
+    return _cards.firstWhere(
+      (card) => card.id == cardId,
+      orElse: () => CardModel.fromMap({}),
+    );
   }
 }

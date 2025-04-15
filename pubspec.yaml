@@ -45,7 +45,7 @@ dependencies:
   table_calendar: ^3.0.9
   file_picker: ^6.1.1
   mime: ^1.0.5
-  record: ^4.4.4
+  record: ^5.2.1
   flutter_plugin_android_lifecycle: ^2.0.17
 
 dev_dependencies:
