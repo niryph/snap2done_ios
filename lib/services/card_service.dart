@@ -7,6 +7,7 @@ import 'dart:convert';
 import '../models/card_model.dart';
 import '../models/task_model.dart';
 import '../services/auth_service.dart';
+import '../features/top_priorities/services/top_priorities_service.dart';
 
 class CardService {
   // Singleton pattern
@@ -74,10 +75,11 @@ class CardService {
     try {
       // Get current user ID
       final userId = _client.auth.currentUser?.id;
-      debugPrint('Creating card for user: $userId');
+      debugPrint('[CardService] Creating card for user: $userId');
+      debugPrint('[CardService] Card metadata type: ${cardData['metadata']?['type']}');
       
       if (userId == null) {
-        debugPrint('Error: User not authenticated');
+        debugPrint('[CardService] Error: User not authenticated');
         throw Exception('User not authenticated');
       }
 
@@ -85,7 +87,7 @@ class CardService {
       final List<Map<String, dynamic>> tasksData = 
           cardData.containsKey('tasks') ? List<Map<String, dynamic>>.from(cardData['tasks']) : [];
       
-      debugPrint('Card has ${tasksData.length} tasks');
+      debugPrint('[CardService] Card has ${tasksData.length} tasks');
       
       // Remove tasks and type from card data as they will be inserted separately
       final cardDataWithoutTasks = Map<String, dynamic>.from(cardData);
@@ -112,6 +114,15 @@ class CardService {
         cardDataWithoutTasks['progress'] = '0%';
       }
 
+      // Special handling for top_priorities card
+      if (cardData['metadata']?['type'] == 'top_priorities') {
+        debugPrint('[CardService] Creating top_priorities card with metadata: ${jsonEncode(cardData['metadata'])}');
+        // Ensure priorities field exists
+        if (cardData['metadata']?['priorities'] == null) {
+          debugPrint('[CardService] Warning: top_priorities card missing priorities field');
+        }
+      }
+
       // If this is a water intake card, ensure metadata is properly initialized
       if (cardData['metadata']?['type'] == 'water_intake') {
         cardDataWithoutTasks['metadata'] = {
@@ -127,7 +138,7 @@ class CardService {
         };
       }
 
-      debugPrint('Creating card in database with data: ${cardDataWithoutTasks.toString()}');
+      debugPrint('[CardService] Creating card in database with data: ${cardDataWithoutTasks.toString()}');
 
       // Create card in database
       final response = await _client
@@ -136,14 +147,15 @@ class CardService {
           .select()
           .single();
       
-      debugPrint('Card created successfully with ID: ${response['id']}');
+      debugPrint('[CardService] Card created successfully with ID: ${response['id']}');
+      debugPrint('[CardService] Card created with metadata type: ${response['metadata']?['type']}');
 
       // Convert response to CardModel
       final card = CardModel.fromMap(response);
 
       // Insert todo entries if any
       if (tasksData.isNotEmpty) {
-        debugPrint('Inserting ${tasksData.length} todo entries for card ${card.id}');
+        debugPrint('[CardService] Inserting ${tasksData.length} todo entries for card ${card.id}');
         
         final todoEntriesToInsert = tasksData.map((task) => {
           ...task,
@@ -158,7 +170,7 @@ class CardService {
             .insert(todoEntriesToInsert)
             .select();
         
-        debugPrint('Todo entries inserted successfully: ${todoEntriesResponse.length} entries');
+        debugPrint('[CardService] Todo entries inserted successfully: ${todoEntriesResponse.length} entries');
 
         card.tasks = List<Map<String, dynamic>>.from(todoEntriesResponse)
             .map((map) => TaskModel.fromMap(map))
@@ -169,16 +181,16 @@ class CardService {
 
       // Notify listeners only if requested
       if (notifyListeners) {
-        debugPrint('Notifying listeners about new card');
+        debugPrint('[CardService] Notifying listeners about new card');
         // Fetch and notify with all cards
         await getCards();
       } else {
-        debugPrint('Skipping listener notification for new card');
+        debugPrint('[CardService] Skipping listener notification for new card');
       }
 
       return card;
     } catch (e) {
-      debugPrint('Error creating card: $e');
+      debugPrint('[CardService] Error creating card: $e');
       rethrow;
     }
   }
@@ -272,7 +284,47 @@ class CardService {
   // Delete a card and its todo entries
   static Future<void> deleteCard(String id) async {
     try {
-      // Delete todo entries first (foreign key constraint)
+      // First, check the card type to handle type-specific cleanup
+      try {
+        final card = await getCardById(id);
+        final cardType = card.metadata?['type'];
+        
+        if (cardType != null) {
+          debugPrint('[CardService] Deleting card with type: $cardType, id: $id');
+          
+          // Handle different card types
+          switch (cardType) {
+            case 'top_priorities':
+              debugPrint('[CardService] Deleting top priorities entries for card: $id');
+              await TopPrioritiesService.deleteEntriesForCard(id);
+              break;
+            case 'mood_gratitude':
+              // TODO: Implement deletion of mood_gratitude entries 
+              // This will be implemented when needed
+              debugPrint('[CardService] Note: mood_gratitude entries cleanup not yet implemented');
+              break;
+            case 'water_intake':
+              // Water intake data is stored in card metadata, no extra cleanup needed
+              debugPrint('[CardService] Water intake data is stored in card metadata, no extra cleanup needed');
+              break;
+            case 'expense_tracker':
+              // TODO: Implement deletion of expense_tracker entries
+              debugPrint('[CardService] Note: expense_tracker entries cleanup not yet implemented');
+              break;
+            case 'calorie_tracker':
+              // TODO: Implement deletion of calorie_tracker entries
+              debugPrint('[CardService] Note: calorie_tracker entries cleanup not yet implemented');
+              break;
+            default:
+              debugPrint('[CardService] No special cleanup needed for card type: $cardType');
+          }
+        }
+      } catch (e) {
+        debugPrint('[CardService] Error checking card type before deletion: $e');
+        // Continue with deletion even if this check fails
+      }
+      
+      // Delete todo entries (foreign key constraint)
       await _client
           .from('todo_entries')
           .delete()
@@ -283,8 +335,10 @@ class CardService {
           .from('cards')
           .delete()
           .eq('id', id);
+          
+      debugPrint('[CardService] Card and associated data deleted successfully: $id');
     } catch (e) {
-      debugPrint('Error deleting card: $e');
+      debugPrint('[CardService] Error deleting card: $e');
       rethrow;
     }
   }

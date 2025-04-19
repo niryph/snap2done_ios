@@ -13,14 +13,34 @@ class TopPrioritiesService {
     final user = AuthService.currentUser;
     if (user == null) throw Exception('User not authenticated');
 
+    // Format date as YYYY-MM-DD to match the format used in savePriorityEntries
+    final dateStr = date.toIso8601String().split('T')[0];
+    print('Getting entries for date: $dateStr');
+
     final response = await _supabase
         .from(_table)
         .select()
         .eq('user_id', user.id)
-        .eq('date', date.toIso8601String())
+        .eq('date', dateStr)
         .order('position');
-    
-    return List<Map<String, dynamic>>.from(response);
+
+    print('Found ${response.length} entries for date $dateStr');
+
+    // Convert database format to app format
+    final result = List<Map<String, dynamic>>.from(response).map((entry) => {
+      'id': entry['id'],
+      'description': entry['description'] ?? '',
+      'notes': entry['notes'] ?? [],
+      'position': entry['position'] ?? 0,
+      'isCompleted': entry['is_completed'] ?? false,
+      'reminderTime': entry['reminder_time'],
+      'metadata': {
+        'type': 'top_priority',
+        'order': (entry['position'] ?? 0) + 1,
+      },
+    }).toList();
+
+    return result;
   }
 
   // Get entries for a date range
@@ -48,7 +68,7 @@ class TopPrioritiesService {
     required String id,
     required DateTime date,
     required String description,
-    required String notes,
+    required dynamic notes,
     required int position,
     required bool isCompleted,
     String? reminderTime,
@@ -56,10 +76,13 @@ class TopPrioritiesService {
     final user = AuthService.currentUser;
     if (user == null) throw Exception('User not authenticated');
 
+    // Format date as YYYY-MM-DD for consistency
+    final dateStr = date.toIso8601String().split('T')[0];
+
     final data = {
       'id': id,
       'user_id': user.id,
-      'date': date.toIso8601String(),
+      'date': dateStr,
       'description': description,
       'notes': notes,
       'position': position,
@@ -76,27 +99,31 @@ class TopPrioritiesService {
 
   // Save multiple priority entries for a date
   static Future<void> savePriorityEntries(
-    DateTime date, 
+    DateTime date,
     List<Map<String, dynamic>> entries,
   ) async {
     final user = AuthService.currentUser;
     if (user == null) throw Exception('User not authenticated');
+
+    // Format date as YYYY-MM-DD for consistency
+    final dateStr = date.toIso8601String().split('T')[0];
+    print('Saving ${entries.length} entries for date: $dateStr');
 
     // Delete existing entries for this date and user
     await _supabase
         .from(_table)
         .delete()
         .eq('user_id', user.id)
-        .eq('date', date.toIso8601String());
+        .eq('date', dateStr);
 
     // Insert new entries
     if (entries.isNotEmpty) {
       final data = entries.map((entry) => {
         'id': entry['id'],
         'user_id': user.id,
-        'date': date.toIso8601String(),
+        'date': dateStr,
         'description': entry['description'] ?? '',
-        'notes': entry['notes'] ?? '',
+        'notes': entry['notes'] ?? [],
         'position': entry['position'] ?? 0,
         'is_completed': entry['isCompleted'] ?? false,
         'reminder_time': entry['reminderTime'],
@@ -105,6 +132,8 @@ class TopPrioritiesService {
       await _supabase
           .from(_table)
           .upsert(data);
+
+      print('Saved ${entries.length} entries for date $dateStr');
     }
   }
 
@@ -113,11 +142,14 @@ class TopPrioritiesService {
     final user = AuthService.currentUser;
     if (user == null) throw Exception('User not authenticated');
 
+    // Format date as YYYY-MM-DD for consistency
+    final dateStr = date.toIso8601String().split('T')[0];
+
     await _supabase
         .from(_table)
         .delete()
         .eq('user_id', user.id)
-        .eq('date', date.toIso8601String());
+        .eq('date', dateStr);
   }
 
   // Delete entries for a specific card
@@ -144,4 +176,4 @@ class TopPrioritiesService {
       position: index,
     ));
   }
-} 
+}

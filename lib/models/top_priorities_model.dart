@@ -3,7 +3,7 @@
     final dateKey = dateToKey(now);
     
     return {
-      'title': 'Daily Top 3 Priorities',
+      'title': 'Daily Top Priorities',
       'description': 'Focus on your most important tasks',
       'color': 0xFFE53935,  // Red color
       'tags': ['Productivity'],

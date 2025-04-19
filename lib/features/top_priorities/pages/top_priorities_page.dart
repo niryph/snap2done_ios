@@ -25,6 +25,8 @@ import '../../../services/storage_service.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../../services/attachment_service.dart';
 import 'package:path/path.dart' as path;
+import '../../../pages/review_todo_list_page.dart';
+import '../../../services/todo_service.dart';
 
 class TopPrioritiesPage extends StatefulWidget {
   final String? cardId;
@@ -53,7 +55,7 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
   bool _isLoading = false;
   int? _draggedItemIndex;
   List<Map<String, dynamic>>? _initialTasks; // Store initial state
-  
+
   // Add a map to store text controllers for each task
   final Map<String, TextEditingController> _textControllers = {};
   // Map to store individual reminder times for each task
@@ -63,82 +65,266 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
   void initState() {
     super.initState();
     _selectedDate = DateTime.now();
-    
+    _isLoading = true;
+
     if (widget.isEditing && widget.metadata != null) {
       // Initialize from existing metadata
-      _initializeFromMetadata();
+      // Use Future.microtask to schedule the async operation after the current frame
+      Future.microtask(() async {
+        await _initializeFromMetadata();
+        // Add listener to sync controller values with tasks
+        _addTextControllerListeners();
+      });
     } else {
       // Initialize with defaults for new card
       _tasks = TopPrioritiesModel.getDefaultTasks();
       _initialTasks = List<Map<String, dynamic>>.from(_tasks.map((task) => Map<String, dynamic>.from(task)));
       _initializeTextControllers();
+      // Add listener to sync controller values with tasks
+      _addTextControllerListeners();
+      setState(() {
+        _isLoading = false;
+      });
     }
   }
-  
+
   @override
   void dispose() {
     // Dispose all text controllers
     for (var controller in _textControllers.values) {
+      controller.removeListener(() {}); // Remove any existing listeners
       controller.dispose();
     }
     super.dispose();
   }
-  
+
   // Initialize text controllers for each task
   void _initializeTextControllers() {
+    // First dispose all existing controllers to avoid memory leaks
+    for (var controller in _textControllers.values) {
+      controller.removeListener(() {}); // Remove any existing listeners
+      controller.dispose();
+    }
+    _textControllers.clear();
+
+    // Then create new controllers for each task
     for (var task in _tasks) {
       final id = task['id'] as String;
-      _textControllers[id] = TextEditingController(text: task['description'] as String);
+      _textControllers[id] = TextEditingController(text: task['description'] as String? ?? '');
     }
   }
 
-  void _initializeFromMetadata() {
+  // Add text controller listeners to update task descriptions as the user types
+  void _addTextControllerListeners() {
+    for (var task in _tasks) {
+      final id = task['id'] as String;
+      if (_textControllers.containsKey(id)) {
+        _textControllers[id]!.addListener(() {
+          final controller = _textControllers[id]!;
+          // Only update if the task exists and the values differ
+          final taskIndex = _tasks.indexWhere((t) => t['id'] == id);
+          if (taskIndex != -1 && _tasks[taskIndex]['description'] != controller.text) {
+            _tasks[taskIndex]['description'] = controller.text;
+            // Update placeholder status
+            if (_tasks[taskIndex]['metadata'] != null) {
+              _tasks[taskIndex]['metadata']['placeholder'] = controller.text.isEmpty;
+            }
+          }
+        });
+      }
+    }
+  }
+
+  Future<void> _initializeFromMetadata() async {
     print('[TopPrioritiesPage] Initializing from metadata');
-    
-    final card = CardService.getCard(widget.cardId!);
-    print('[TopPrioritiesPage] Card: ${card?.id}, metadata: ${card?.metadata}');
-    
-    if (card?.metadata == null) {
-      print('[TopPrioritiesPage] No metadata found for card');
-      return;
+    setState(() {
+      _isLoading = true;
+    });
+
+    try {
+      // First try to load tasks from the database
+      print('[TopPrioritiesPage] Trying to load tasks from database for date: $_selectedDate');
+      final savedTasks = await TopPrioritiesService.getEntriesForDate(_selectedDate);
+      print('[TopPrioritiesPage] Found ${savedTasks.length} tasks in database');
+
+      if (savedTasks.isNotEmpty) {
+        // If we have tasks in the database, use them
+        _tasks = savedTasks;
+        print('[TopPrioritiesPage] Using tasks from database');
+      } else {
+        // If no tasks in database, try to get them from card metadata
+        print('[TopPrioritiesPage] No tasks in database, trying card metadata');
+        final card = CardService.getCard(widget.cardId!);
+        print('[TopPrioritiesPage] Card: ${card?.id}, metadata: ${card?.metadata}');
+
+        if (card?.metadata == null) {
+          print('[TopPrioritiesPage] No metadata found for card');
+          // Initialize with defaults if no metadata
+          _tasks = TopPrioritiesModel.getDefaultTasks();
+        } else {
+          final metadata = card!.metadata!;
+          print('[TopPrioritiesPage] Processing metadata: $metadata');
+
+          try {
+            // Check if we have the new format with 'priorities' field
+            if (metadata['priorities'] != null) {
+              final priorities = metadata['priorities'] as Map<String, dynamic>;
+
+              // Get today's date in the format used as key (YYYY-MM-DD)
+              final today = TopPrioritiesModel.dateToKey(_selectedDate);
+
+              // If there are entries for today, use them
+              if (priorities.containsKey(today)) {
+                final todayData = priorities[today] as Map<String, dynamic>;
+
+                if (todayData['tasks'] != null) {
+                  try {
+                    // Fix: Properly handle List<dynamic> to List<Map<String, dynamic>> conversion
+                    final tasksList = todayData['tasks'] as List;
+                    _tasks = tasksList.map((item) =>
+                      // Convert each dynamic item to a proper Map<String, dynamic>
+                      Map<String, dynamic>.from(item as Map<dynamic, dynamic>)
+                    ).toList();
+                    print('[TopPrioritiesPage] Using tasks from metadata');
+                  } catch (e) {
+                    print('[TopPrioritiesPage] Error parsing tasks: $e');
+                    // Fall back to defaults on error
+                    _tasks = TopPrioritiesModel.getDefaultTasks();
+                  }
+                } else {
+                  _tasks = TopPrioritiesModel.getDefaultTasks();
+                }
+              } else {
+                // No data for today, use defaults
+                _tasks = TopPrioritiesModel.getDefaultTasks();
+              }
+            }
+            // Fallback for old format
+            else if (metadata['tasks'] != null) {
+              try {
+                // Fix: Properly handle List<dynamic> to List<Map<String, dynamic>> conversion
+                final tasksList = metadata['tasks'] as List;
+                _tasks = tasksList.map((item) =>
+                  // Convert each dynamic item to a proper Map<String, dynamic>
+                  Map<String, dynamic>.from(item as Map<dynamic, dynamic>)
+                ).toList();
+              } catch (e) {
+                print('[TopPrioritiesPage] Error parsing tasks from metadata: $e');
+                // Fall back to defaults on error
+                _tasks = TopPrioritiesModel.getDefaultTasks();
+              }
+            }
+            // If no tasks found at all, use defaults
+            else {
+              _tasks = TopPrioritiesModel.getDefaultTasks();
+            }
+          } catch (e) {
+            print('[TopPrioritiesPage] Error processing metadata: $e');
+            // Fall back to defaults if metadata is malformed
+            _tasks = TopPrioritiesModel.getDefaultTasks();
+          }
+
+          // Initialize attachments if any
+          if (metadata['attachments'] != null) {
+            try {
+              // Fix: Properly handle List<dynamic> to List<Map<String, dynamic>> conversion
+              final attachmentsList = metadata['attachments'] as List;
+              _attachments = attachmentsList.map((item) =>
+                // Convert each dynamic item to a proper Map<String, dynamic>
+                Map<String, dynamic>.from(item as Map<dynamic, dynamic>)
+              ).toList();
+            } catch (e) {
+              print('[TopPrioritiesPage] Error parsing attachments: $e');
+              // Keep attachments empty on error
+              _attachments = [];
+            }
+          }
+        }
+      }
+
+      // Ensure the notes field is properly formatted
+      _migrateNotesToList();
+
+      // Store initial state for change detection
+      _initialTasks = List<Map<String, dynamic>>.from(_tasks.map((task) => Map<String, dynamic>.from(task)));
+
+      // Initialize text controllers
+      _initializeTextControllers();
+
+      print('[TopPrioritiesPage] Initialization complete');
+      print('[TopPrioritiesPage] Date: $_selectedDate');
+      print('[TopPrioritiesPage] Tasks count: ${_tasks.length}');
+      print('[TopPrioritiesPage] Attachments count: ${_attachments.length}');
+    } catch (e) {
+      print('[TopPrioritiesPage] Fatal error in initialization: $e');
+      // Set up defaults if there's a fatal error
+      _tasks = TopPrioritiesModel.getDefaultTasks();
+      _initialTasks = List<Map<String, dynamic>>.from(_tasks.map((task) => Map<String, dynamic>.from(task)));
+      _initializeTextControllers();
+      _attachments = [];
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
+      }
     }
-
-    final metadata = card!.metadata!;
-    print('[TopPrioritiesPage] Processing metadata: $metadata');
-
-    // Initialize date
-    if (metadata['date'] != null) {
-      print('[TopPrioritiesPage] Setting date: ${metadata['date']}');
-      _selectedDate = DateTime.parse(metadata['date']);
-    }
-
-    // Initialize tasks
-    if (metadata['tasks'] != null) {
-      print('[TopPrioritiesPage] Setting tasks: ${metadata['tasks']}');
-      _tasks = List<Map<String, dynamic>>.from(metadata['tasks']);
-    }
-
-    // Initialize attachments
-    if (metadata['attachments'] != null) {
-      print('[TopPrioritiesPage] Setting attachments: ${metadata['attachments']}');
-      _attachments = List<Map<String, dynamic>>.from(metadata['attachments']);
-    }
-
-    print('[TopPrioritiesPage] Initialization complete');
-    print('[TopPrioritiesPage] Date: $_selectedDate');
-    print('[TopPrioritiesPage] Tasks count: ${_tasks.length}');
-    print('[TopPrioritiesPage] Attachments count: ${_attachments.length}');
   }
 
   void _migrateNotesToList() {
     for (var task in _tasks) {
-      if (task['notes'] == null) {
+      try {
+        if (task['notes'] == null) {
+          task['notes'] = <String>[];
+        } else if (task['notes'] is String) {
+          final oldNote = task['notes'] as String;
+          task['notes'] = oldNote.isNotEmpty ? <String>[oldNote] : <String>[];
+        } else if (task['notes'] is List) {
+          // Handle List<dynamic> by converting each item to String
+          List<dynamic> dynamicList = task['notes'] as List<dynamic>;
+          task['notes'] = dynamicList.map((item) => item?.toString() ?? '').toList();
+        } else {
+          // Fallback for any other type
+          task['notes'] = <String>[];
+          print('[TopPrioritiesPage] Unexpected notes type: ${task['notes'].runtimeType}, resetting to empty list');
+        }
+      } catch (e) {
+        print('[TopPrioritiesPage] Error migrating notes: $e');
         task['notes'] = <String>[];
-      } else if (task['notes'] is String) {
-        final oldNote = task['notes'] as String;
-        task['notes'] = oldNote.isNotEmpty ? <String>[oldNote] : <String>[];
-      } else if (task['notes'] is! List<String>) {
-        task['notes'] = <String>[];
+      }
+
+      // Ensure documents field exists
+      try {
+        if (task['documents'] == null) {
+          task['documents'] = <Map<String, dynamic>>[];
+        } else if (task['documents'] is List) {
+          // Handle List<dynamic> for documents
+          List<dynamic> dynamicList = task['documents'] as List<dynamic>;
+
+          // Convert each item in the list to Map<String, dynamic>
+          List<Map<String, dynamic>> convertedList = [];
+          for (var item in dynamicList) {
+            if (item is Map) {
+              // Convert Map<dynamic, dynamic> to Map<String, dynamic>
+              convertedList.add(Map<String, dynamic>.from(item));
+            }
+          }
+          task['documents'] = convertedList;
+        } else {
+          task['documents'] = <Map<String, dynamic>>[];
+          print('[TopPrioritiesPage] Invalid documents field type: ${task['documents'].runtimeType}, resetting to empty list');
+        }
+      } catch (e) {
+        print('[TopPrioritiesPage] Error migrating documents: $e');
+        task['documents'] = <Map<String, dynamic>>[];
+      }
+
+      // Ensure metadata field exists
+      if (task['metadata'] == null) {
+        task['metadata'] = {
+          'type': 'top_priority',
+          'order': task['position'] != null ? (task['position'] as int) + 1 : 1,
+        };
       }
     }
   }
@@ -157,7 +343,7 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
                 ? BackgroundPatterns.darkThemeBackground()
                 : BackgroundPatterns.lightThemeBackground(),
           ),
-          
+
           // Main content
           StreamBuilder<List<CardModel>>(
             stream: CardService.cardStream,
@@ -169,7 +355,7 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
                 print('[TopPrioritiesPage] Data length: ${snapshot.data?.length}');
                 print('[TopPrioritiesPage] Cards: ${snapshot.data?.map((c) => '${c.id}: ${c.metadata?['type']}')}');
               }
-              
+
               if (snapshot.hasError) {
                 debugPrint('[TopPrioritiesPage] Error in card stream: ${snapshot.error}');
                 return Center(child: Text('Error loading cards'));
@@ -182,10 +368,11 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
                   (card) => card.id == widget.cardId,
                   orElse: () => CardModel.fromMap({}),
                 );
-                
+
                 print('[TopPrioritiesPage] Found card: ${card.id}, metadata: ${card.metadata}');
-                
-                if (card.id != null && card.metadata != null) {
+
+                // Only update if we're not already loading data and this is not a checkbox update
+                if (card.id != null && card.metadata != null && !_isLoading) {
                   // Update local state with new card data
                   print('[TopPrioritiesPage] Scheduling state update with new card data');
                   WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -208,19 +395,19 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
                   elevation: 0,
                   leading: IconButton(
                     icon: Icon(Icons.arrow_back),
-                    onPressed: () {
-                      _onBackPressed().then((canPop) {
-                        if (canPop) {
-                          Navigator.of(context).pop();
-                        }
-                      });
+                    onPressed: () async {
+                      final canPop = await _onBackPressed();
+                      if (canPop && mounted) {
+                        // Use Navigator.pushReplacementNamed to avoid black screen
+                        Navigator.of(context).pushReplacementNamed('/');
+                      }
                     },
                   ),
                   actions: [
-                    if (widget.isEditing) 
+                    if (widget.isEditing)
                       IconButton(
-                        icon: Icon(Icons.delete, color: Colors.red),
-                        onPressed: _deleteCard,
+                        icon: Icon(Icons.settings),
+                        onPressed: _openEditTodoCardPage,
                       ),
                   ],
                 ),
@@ -296,7 +483,7 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
                                   ),
                                 ),
                                 SizedBox(height: 16),
-                                
+
                                 // Tasks list
                                 ReorderableListView.builder(
                                   buildDefaultDragHandles: false,
@@ -310,7 +497,7 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
                                       }
                                       final item = _tasks.removeAt(oldIndex);
                                       _tasks.insert(newIndex, item);
-                                      
+
                                       // Update positions after reorder
                                       for (var i = 0; i < _tasks.length; i++) {
                                         _tasks[i]['position'] = i;
@@ -370,10 +557,36 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
                                                   shape: RoundedRectangleBorder(
                                                     borderRadius: BorderRadius.circular(4),
                                                   ),
-                                                  onChanged: (value) {
+                                                  onChanged: (value) async {
                                                     setState(() {
                                                       task['isCompleted'] = value;
+                                                      _isLoading = true; // Show loading indicator
                                                     });
+
+                                                    try {
+                                                      // Save changes to database immediately
+                                                      await _saveTaskCompletionStatus(task);
+                                                    } catch (e) {
+                                                      print('Error saving task completion status: $e');
+                                                      // Revert the change if there was an error
+                                                      if (mounted) {
+                                                        setState(() {
+                                                          task['isCompleted'] = !value!;
+                                                          ScaffoldMessenger.of(context).showSnackBar(
+                                                            SnackBar(
+                                                              content: Text('Error updating task: $e'),
+                                                              backgroundColor: Colors.red,
+                                                            ),
+                                                          );
+                                                        });
+                                                      }
+                                                    } finally {
+                                                      if (mounted) {
+                                                        setState(() {
+                                                          _isLoading = false; // Hide loading indicator
+                                                        });
+                                                      }
+                                                    }
                                                   },
                                                 ) : Container(
                                                   width: 24,
@@ -399,7 +612,7 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
                                                   ),
                                                 ),
                                                 title: Text(
-                                                  task['metadata']?['placeholder'] == true 
+                                                  task['metadata']?['placeholder'] == true
                                                     ? 'Priority #${task['metadata']?['order']}'
                                                     : (task['description'] ?? ''),
                                                   style: TextStyle(
@@ -424,9 +637,15 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
                                                     IconButton(
                                                       icon: Icon(Icons.delete_outline, size: 20),
                                                       color: Colors.red.withOpacity(0.7),
-                                                      onPressed: () {
+                                                      onPressed: () async {
                                                         setState(() {
-                                                          _tasks.removeAt(index);
+                                                          _isLoading = true; // Show loading indicator
+                                                        });
+
+                                                        try {
+                                                          // Remove the task from the UI
+                                                          final deletedTask = _tasks.removeAt(index);
+
                                                           // Update order for remaining tasks
                                                           for (var i = 0; i < _tasks.length; i++) {
                                                             _tasks[i]['position'] = i;
@@ -436,7 +655,35 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
                                                               'order': i + 1,
                                                             };
                                                           }
-                                                        });
+
+                                                          // Save changes to database
+                                                          await _saveTasksAfterDelete(deletedTask);
+
+                                                          if (mounted) {
+                                                            ScaffoldMessenger.of(context).showSnackBar(
+                                                              SnackBar(
+                                                                content: Text('Task deleted successfully'),
+                                                                backgroundColor: Colors.green,
+                                                              ),
+                                                            );
+                                                          }
+                                                        } catch (e) {
+                                                          print('Error deleting task: $e');
+                                                          if (mounted) {
+                                                            ScaffoldMessenger.of(context).showSnackBar(
+                                                              SnackBar(
+                                                                content: Text('Error deleting task: $e'),
+                                                                backgroundColor: Colors.red,
+                                                              ),
+                                                            );
+                                                          }
+                                                        } finally {
+                                                          if (mounted) {
+                                                            setState(() {
+                                                              _isLoading = false; // Hide loading indicator
+                                                            });
+                                                          }
+                                                        }
                                                       },
                                                       padding: EdgeInsets.zero,
                                                       constraints: BoxConstraints(
@@ -600,7 +847,7 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
                                                         Column(
                                                           crossAxisAlignment: CrossAxisAlignment.start,
                                                           children: [
-                                                            if ((task['documents'] as List<Map<String, dynamic>>?)?.isNotEmpty ?? false) ...[
+                                                            if (task['documents'] != null && (task['documents'] as List).isNotEmpty) ...[
                                                               Text(
                                                                 'Documents',
                                                                 style: TextStyle(
@@ -613,7 +860,12 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
                                                                 spacing: 8,
                                                                 runSpacing: 8,
                                                                 children: [
-                                                                  ...(task['documents'] as List<Map<String, dynamic>>).map((doc) {
+                                                                  ...(task['documents'] as List).map((docItem) {
+                                                                    // Safely convert to Map<String, dynamic>
+                                                                    final doc = docItem is Map ?
+                                                                      Map<String, dynamic>.from(docItem as Map) :
+                                                                      <String, dynamic>{};
+
                                                                     return Container(
                                                                       width: 100,
                                                                       child: Column(
@@ -630,7 +882,7 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
                                                                                 child: InkWell(
                                                                                   onTap: () => _openDocument(doc),
                                                                                   child: Image.asset(
-                                                                                    TopPrioritiesModel.getDocumentTypeIcon(doc['mimeType']),
+                                                                                    TopPrioritiesModel.getDocumentTypeIcon(doc['mimeType']?.toString() ?? ''),
                                                                                     width: 40,
                                                                                     height: 40,
                                                                                   ),
@@ -649,7 +901,7 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
                                                                                       }
                                                                                       // Then remove from UI
                                                                                       setState(() {
-                                                                                        (task['documents'] as List).remove(doc);
+                                                                                        (task['documents'] as List).remove(docItem);
                                                                                       });
                                                                                     } catch (e) {
                                                                                       print('Error deleting document: $e');
@@ -671,7 +923,7 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
                                                                           ),
                                                                           SizedBox(height: 4),
                                                                           Text(
-                                                                            doc['name'] as String,
+                                                                            doc['name']?.toString() ?? 'Document',
                                                                             maxLines: 2,
                                                                             overflow: TextOverflow.ellipsis,
                                                                             textAlign: TextAlign.center,
@@ -923,7 +1175,7 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
       firstDate: DateTime.now().subtract(const Duration(days: 365)),
       lastDate: DateTime.now().add(const Duration(days: 365)),
     );
-    
+
     if (picked != null && picked != _selectedDate) {
       _selectDate(picked);
     }
@@ -933,33 +1185,71 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
     // First update the date immediately to make UI responsive
     setState(() {
       _selectedDate = date;
+      _isLoading = true;
     });
-    
+
     // Then load the tasks in the background
     try {
       // Load tasks from the service for the selected date
+      print('[TopPrioritiesPage] Loading tasks from database for date: $date');
       final savedTasks = await TopPrioritiesService.getEntriesForDate(date);
-    
+      print('[TopPrioritiesPage] Found ${savedTasks.length} tasks in database for date: $date');
+
       if (!mounted) return;
 
       setState(() {
         if (savedTasks.isNotEmpty) {
+          // If we have tasks in the database, use them
           _tasks = savedTasks;
+          print('[TopPrioritiesPage] Using tasks from database');
           _migrateNotesToList();
-        } else if (widget.isEditing && widget.metadata != null) {
-          // Fall back to metadata if available
+        } else if (widget.isEditing) {
+          // If no tasks in database, try to get them from card metadata
+          print('[TopPrioritiesPage] No tasks in database, trying card metadata');
+          // Get today's date in the format used as key (YYYY-MM-DD)
           final dateKey = TopPrioritiesModel.dateToKey(date);
-          final dayData = widget.metadata!['priorities']?[dateKey];
-          if (dayData != null) {
+          Map<String, dynamic>? metadata;
+
+          // Try to get fresh metadata from card if available
+          if (widget.cardId != null) {
+            final card = CardService.getCard(widget.cardId!);
+            metadata = card?.metadata;
+            print('[TopPrioritiesPage] Card metadata: $metadata');
+          }
+
+          // Fall back to widget metadata if necessary
+          if (metadata == null) {
+            metadata = widget.metadata;
+            print('[TopPrioritiesPage] Using widget metadata: $metadata');
+          }
+
+          // Check if we have data for this date in the priorities
+          final dayData = metadata?['priorities']?[dateKey];
+          print('[TopPrioritiesPage] Day data for $dateKey: $dayData');
+
+          if (dayData != null && dayData['tasks'] != null) {
             _tasks = List<Map<String, dynamic>>.from(dayData['tasks']);
+            print('[TopPrioritiesPage] Using tasks from metadata');
             _migrateNotesToList();
           } else {
             _tasks = TopPrioritiesModel.getDefaultTasks();
+            print('[TopPrioritiesPage] Using default tasks');
           }
         } else {
           _tasks = TopPrioritiesModel.getDefaultTasks();
+          print('[TopPrioritiesPage] Using default tasks (not editing)');
         }
+
+        // Initialize text controllers for the new tasks
         _initializeTextControllers();
+
+        // Add listener to sync controller values with tasks
+        _addTextControllerListeners();
+
+        // Store initial state for change detection
+        _initialTasks = List<Map<String, dynamic>>.from(_tasks.map((task) => Map<String, dynamic>.from(task)));
+
+        _isLoading = false;
       });
     } catch (e) {
       print('Error loading tasks: $e');
@@ -967,19 +1257,23 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
       setState(() {
         _tasks = TopPrioritiesModel.getDefaultTasks();
         _initializeTextControllers();
+        _isLoading = false;
       });
     }
   }
 
   Future<void> _saveChanges() async {
     if (_isLoading) return;
-    
+
     if (!mounted) return;
     setState(() {
       _isLoading = true;
     });
-    
+
     try {
+      // First, update task descriptions from text controllers
+      _updateTasksFromControllers();
+
       final user = AuthService.currentUser;
       if (user == null) {
         if (!mounted) return;
@@ -991,7 +1285,7 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
 
       // Save priority entries
       await TopPrioritiesService.savePriorityEntries(
-        _selectedDate, 
+        _selectedDate,
         _tasks,
       );
 
@@ -1045,7 +1339,7 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
       context: context,
       initialTime: TimeOfDay.now(),
     );
-    
+
     if (picked != null) {
                               setState(() {
         // Find and update the task with the new reminder time
@@ -1056,14 +1350,14 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
           }
         }
       });
-      
+
       // Schedule the reminder
       final reminderService = PrioritiesReminderService();
       await reminderService.scheduleDailyReminder(
         cardId: widget.cardId ?? taskId, // Use card ID if available, otherwise use task ID
         reminderTime: picked,
       );
-      
+
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text('Reminder set for ${picked.format(context)}'),
@@ -1081,6 +1375,63 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
     return monthNames[month - 1];
   }
 
+  // Navigate to Edit Todo Card page
+  void _openEditTodoCardPage() {
+    if (widget.cardId == null) return;
+
+    // Get the card to access its properties
+    final card = CardService.getCard(widget.cardId!);
+    if (card == null) return;
+
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => ReviewTodoListPage(
+          ocrText: '',
+          initialResult: {
+            'id': widget.cardId,
+            'title': 'Daily Top Priorities',
+            'color': card.color ?? '0xFF6C5CE7', // Use the card's color or default purple
+            'tags': card.tags.toList(), // Include the card's tags
+            'tasks': _tasks.map((task) => {
+              'id': task['id'],
+              'description': task['description'],
+              'isCompleted': task['isCompleted'],
+              'priority': task['priority'] ?? 'medium',
+              'notes': task['notes'],
+              'position': task['position'],
+            }).toList(),
+            'metadata': card.metadata ?? {}, // Include the card's metadata
+          },
+          onSaveCard: (updatedCard) async {
+            try {
+              // Update card in database
+              await CardService.updateCard(updatedCard);
+
+              // Show success message
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text('Card updated successfully'),
+                  backgroundColor: Colors.green,
+                ),
+              );
+            } catch (e) {
+              print('Error updating card: $e');
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text('Error updating card: $e'),
+                  backgroundColor: Colors.red,
+                ),
+              );
+            }
+          },
+          isViewMode: false,
+        ),
+      ),
+    );
+  }
+
+  // Keep the delete card method for reference but it's not used anymore
   Future<void> _deleteCard() async {
     if (widget.cardId == null) return;
 
@@ -1119,32 +1470,93 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
     }
   }
 
+  // Check if a top priorities card already exists for the current date
+  Future<String?> _findExistingCardForDate() async {
+    try {
+      // Get all cards
+      final cards = await CardService.getCards();
+
+      // Filter for top priorities cards
+      final topPrioritiesCards = cards.where((card) =>
+        card.metadata != null && card.metadata!['type'] == 'top_priorities').toList();
+
+      // Get the date key for the selected date
+      final dateKey = TopPrioritiesModel.dateToKey(_selectedDate);
+
+      // Find a card that has data for the selected date
+      for (final card in topPrioritiesCards) {
+        if (card.metadata != null &&
+            card.metadata!['priorities'] != null &&
+            (card.metadata!['priorities'] as Map<String, dynamic>).containsKey(dateKey)) {
+          return card.id;
+        }
+      }
+
+      return null; // No existing card found for this date
+    } catch (e) {
+      print('Error finding existing card: $e');
+      return null;
+    }
+  }
+
   Future<void> _createCard() async {
     setState(() {
       _isLoading = true;
     });
 
     try {
-      // Call onSave callback to create the card
-      final cardId = await widget.onSave(TopPrioritiesModel.createDefaultMetadata());
-      
+      // First, update task descriptions from text controllers
+      _updateTasksFromControllers();
+
+      // Check if a card already exists for this date
+      final existingCardId = await _findExistingCardForDate();
+
+      String? cardId;
+      if (existingCardId != null) {
+        // Card already exists, just update it
+        cardId = existingCardId;
+        print('Using existing card: $cardId');
+
+        // Update the card metadata
+        final dateKey = TopPrioritiesModel.dateToKey(_selectedDate);
+        final updatedMetadata = {
+          'type': 'top_priorities',
+          'version': '1.0',
+          'priorities': {
+            dateKey: {
+              'lastModified': DateTime.now().toIso8601String(),
+              'tasks': _tasks,
+            }
+          }
+        };
+        await CardService.updateCardMetadata(cardId, updatedMetadata);
+      } else {
+        // No existing card, create a new one
+        cardId = await widget.onSave(TopPrioritiesModel.createDefaultMetadata());
+        print('Created new card: $cardId');
+      }
+
       // Save the entries
       await TopPrioritiesService.savePriorityEntries(
         _selectedDate,
         _tasks,
       );
 
+      // No need to interact with todo_entries table for top priorities
+
       if (mounted) {
-        // Pop back to previous screen after successful creation
-        Navigator.of(context).pop();
-        
         // Show success message
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Top priorities card created successfully'),
+          SnackBar(
+            content: Text(existingCardId != null
+              ? 'Changes saved successfully'
+              : 'Top priorities card created successfully'),
             backgroundColor: Colors.green,
           ),
         );
+
+        // Let WillPopScope handle the navigation
+        // We'll return from _onBackPressed() which will trigger the navigation
       }
     } catch (e) {
       print('Error creating top priorities card: $e');
@@ -1169,7 +1581,7 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
     final dateToCheck = DateTime(date.year, date.month, date.day);
-    
+
     return dateToCheck == today || // Today
            dateToCheck == today.subtract(Duration(days: 1)) || // Yesterday
            dateToCheck == today.add(Duration(days: 1)); // Tomorrow
@@ -1198,6 +1610,9 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
 
   // Add method to handle back button press
   Future<bool> _onBackPressed() async {
+    // First, update task descriptions from text controllers
+    _updateTasksFromControllers();
+
     if (!widget.isEditing && _hasChanges()) {
       final result = await showDialog<int>(
         context: context,
@@ -1214,7 +1629,7 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
             ),
             ElevatedButton(
               onPressed: () => Navigator.of(context).pop(1), // Create
-              child: Text('Create Card'),
+              child: Text('Save Changes'),
               style: ElevatedButton.styleFrom(
                 backgroundColor: Colors.green,
               ),
@@ -1224,9 +1639,17 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
       );
 
       if (result == 1) {
-        // User chose to create card
-        await _createCard();
-        return true;
+        // User chose to save changes
+        try {
+          // Save the card
+          await _saveCardWithoutPopping();
+
+          // Return true to allow WillPopScope to handle the navigation
+          return true;
+        } catch (e) {
+          print('Error saving card: $e');
+          return false; // Don't pop if there was an error
+        }
       } else if (result == 0) {
         // User chose to discard changes
         return true;
@@ -1236,22 +1659,201 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
     return true;
   }
 
+  // Save card without popping the navigation stack
+  Future<void> _saveCardWithoutPopping() async {
+    setState(() {
+      _isLoading = true;
+    });
+
+    try {
+      // First, update task descriptions from text controllers
+      _updateTasksFromControllers();
+
+      // Check if a card already exists for this date
+      final existingCardId = await _findExistingCardForDate();
+
+      String? cardId;
+      if (existingCardId != null) {
+        // Card already exists, just update it
+        cardId = existingCardId;
+        print('Using existing card: $cardId');
+
+        // Update the card metadata
+        final dateKey = TopPrioritiesModel.dateToKey(_selectedDate);
+        final updatedMetadata = {
+          'type': 'top_priorities',
+          'version': '1.0',
+          'priorities': {
+            dateKey: {
+              'lastModified': DateTime.now().toIso8601String(),
+              'tasks': _tasks,
+            }
+          }
+        };
+        await CardService.updateCardMetadata(cardId, updatedMetadata);
+      } else {
+        // No existing card, create a new one
+        cardId = await widget.onSave(TopPrioritiesModel.createDefaultMetadata());
+        print('Created new card: $cardId');
+      }
+
+      // Save all tasks to top_priorities_entries
+      await TopPrioritiesService.savePriorityEntries(_selectedDate, _tasks);
+
+      // No need to interact with todo_entries table for top priorities
+
+      if (mounted) {
+        // Show success message
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(existingCardId != null
+              ? 'Changes saved successfully'
+              : 'Top priorities card created successfully'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+    } catch (e) {
+      print('Error saving top priorities: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error saving changes: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+      rethrow; // Rethrow to handle in the calling method
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
+      }
+    }
+  }
+
+  // Add new method to update tasks from text controllers
+  void _updateTasksFromControllers() {
+    for (var task in _tasks) {
+      final id = task['id'] as String;
+      if (_textControllers.containsKey(id)) {
+        final controller = _textControllers[id];
+        if (controller != null && controller.text != task['description']) {
+          task['description'] = controller.text;
+
+          // Update placeholder status based on text content
+          if (task['metadata'] != null) {
+            task['metadata']['placeholder'] = controller.text.isEmpty;
+          }
+        }
+      }
+    }
+  }
+
+  // Save tasks after deleting a task
+  Future<void> _saveTasksAfterDelete(Map<String, dynamic> deletedTask) async {
+    try {
+      // First, update task descriptions from text controllers
+      _updateTasksFromControllers();
+
+      // Save to the top_priorities_entries table
+      await TopPrioritiesService.savePriorityEntries(
+        _selectedDate,
+        _tasks,
+      );
+
+      print('Tasks saved successfully after deleting task: ${deletedTask['id']}');
+    } catch (e) {
+      print('Error saving tasks after delete: $e');
+      rethrow; // Rethrow to handle in the calling method
+    }
+  }
+
+  // Save task completion status to database
+  Future<void> _saveTaskCompletionStatus(Map<String, dynamic> task) async {
+    try {
+      // First, update task descriptions from text controllers
+      _updateTasksFromControllers();
+
+      // Save only to the top_priorities_entries table, not to the card metadata
+      // This avoids triggering the StreamBuilder which causes the infinite loop
+      await TopPrioritiesService.savePriorityEntries(
+        _selectedDate,
+        _tasks,
+      );
+
+      print('Task completion status saved successfully: ${task['id']}, isCompleted: ${task['isCompleted']}');
+    } catch (e) {
+      print('Error saving task completion status: $e');
+      rethrow; // Rethrow to handle in the calling method
+    }
+  }
+
   Future<void> _addDocument(Map<String, dynamic> task) async {
     try {
       // First ensure the task is saved
-      if (!widget.isEditing || task['id'] == null) {
+      if (task['id'] == null) {
         // Generate an ID for the task if it doesn't have one
-        if (task['id'] == null) {
-          task['id'] = const Uuid().v4();
-        }
-        await _saveChanges();
-      } else {
-        // For existing tasks, ensure it exists in the database
-        final taskExists = await TopPrioritiesService.checkTaskExists(task['id']);
-        if (!taskExists) {
-          await TopPrioritiesService.savePriorityEntry(_selectedDate, task);
-        }
+        task['id'] = const Uuid().v4();
       }
+
+      // Instead of saving just this task, save all tasks at once
+      // This avoids conflicts with the unique_user_date_position constraint
+      await TopPrioritiesService.savePriorityEntries(_selectedDate, _tasks);
+
+      // Get or create a card ID
+      String cardId;
+      if (widget.isEditing && widget.cardId != null) {
+        // If we're in editing mode, use the existing card ID
+        cardId = widget.cardId!;
+
+        // Update the card metadata
+        final dateKey = TopPrioritiesModel.dateToKey(_selectedDate);
+        final updatedMetadata = {
+          'type': 'top_priorities',
+          'version': '1.0',
+          'priorities': {
+            dateKey: {
+              'lastModified': DateTime.now().toIso8601String(),
+              'tasks': _tasks,
+            }
+          }
+        };
+        await CardService.updateCardMetadata(cardId, updatedMetadata);
+      } else {
+        // If we're in creation mode, create a temporary card
+        final user = AuthService.currentUser;
+        if (user == null) throw Exception('User not authenticated');
+
+        // Create a temporary card in the cards table
+        final dateKey = TopPrioritiesModel.dateToKey(_selectedDate);
+        final tempCard = await CardService.createCard({
+          'title': 'Daily Top Priorities',
+          'description': 'Top priorities for ${DateFormat('MMMM d, yyyy').format(_selectedDate)}',
+          'color': '0xFF6C5CE7', // Purple color
+          'tags': ['Daily', 'Priorities'],
+          'metadata': {
+            'type': 'top_priorities',
+            'version': '1.0',
+            'priorities': {
+              dateKey: {
+                'lastModified': DateTime.now().toIso8601String(),
+                'tasks': _tasks,
+              }
+            }
+          },
+          'tasks': [], // No tasks in the card itself
+        });
+
+        cardId = tempCard.id;
+      }
+
+      // Make sure the task is saved in top_priorities_entries
+      await TopPrioritiesService.savePriorityEntry(_selectedDate, task);
+
+      final user = AuthService.currentUser;
+      if (user == null) throw Exception('User not authenticated');
 
       final result = await FilePicker.platform.pickFiles(
         type: FileType.custom,
@@ -1300,6 +1902,7 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
         );
 
         try {
+
           // Upload the file using AttachmentService
           final attachmentType = mimeType.startsWith('image/') ? 'image' : 'document';
           final uploadResult = await AttachmentService.uploadAttachment(
@@ -1318,14 +1921,17 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
 
           // Update the UI
           setState(() {
-            if (task['documents'] == null) {
+            // Ensure documents is initialized as a list
+            if (task['documents'] == null || task['documents'] is! List) {
               task['documents'] = [];
             }
-            task['documents'].add({
+
+            // Add the new document
+            (task['documents'] as List).add({
               'id': uploadResult['id'],
               'url': uploadResult['url'],
               'wasabi_path': uploadResult['wasabi_path'],
-              'mime_type': uploadResult['mime_type'],
+              'mimeType': uploadResult['mime_type'],
               'name': fileName,
               'todo_entry_id': task['id'],
             });
@@ -1338,7 +1944,7 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
           // Close loading indicator
           if (!mounted) return;
           Navigator.pop(context);
-          
+
           // Show error
           if (!mounted) return;
           ScaffoldMessenger.of(context).showSnackBar(
@@ -1357,18 +1963,42 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
 
   Future<void> _openDocument(Map<String, dynamic> doc) async {
     try {
-      final signedUrl = await StorageService.getSignedUrl(doc['wasabi_path']);
-      
-      if (doc['mime_type'].startsWith('image/')) {
+      final wasabiPath = doc['wasabi_path'];
+      if (wasabiPath == null) {
+        throw 'Missing document path';
+      }
+
+      final signedUrl = await StorageService.getSignedUrl(wasabiPath.toString());
+
+      final mimeType = doc['mime_type']?.toString() ?? '';
+
+      if (mimeType.startsWith('image/')) {
         // Show image in dialog using the signed URL
         if (!mounted) return;
         showDialog(
           context: context,
           builder: (context) => Dialog(
-            child: Image.network(signedUrl),
+            child: Image.network(
+              signedUrl,
+              loadingBuilder: (context, child, loadingProgress) {
+                if (loadingProgress == null) return child;
+                return Center(
+                  child: CircularProgressIndicator(
+                    value: loadingProgress.expectedTotalBytes != null
+                      ? loadingProgress.cumulativeBytesLoaded / loadingProgress.expectedTotalBytes!
+                      : null,
+                  ),
+                );
+              },
+              errorBuilder: (context, error, stackTrace) {
+                return Center(
+                  child: Text('Error loading image', style: TextStyle(color: Colors.red)),
+                );
+              },
+            ),
           ),
         );
-      } else if (doc['mime_type'].contains('pdf')) {
+      } else if (mimeType.contains('pdf')) {
         // For PDFs, open directly in browser/system viewer
         if (await canLaunch(signedUrl)) {
           await launch(signedUrl);
@@ -1395,27 +2025,60 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
   Future<void> _addVoiceNote(Map<String, dynamic> task) async {
     try {
       // First ensure the task is saved
-      if (!widget.isEditing || task['id'] == null) {
+      if (task['id'] == null) {
         // Generate an ID for the task if it doesn't have one
-        if (task['id'] == null) {
-          task['id'] = const Uuid().v4();
-        }
-        await _saveChanges();
-      } else {
-        // For existing tasks, ensure it exists in the database
-        final taskExists = await TopPrioritiesService.checkTaskExists(task['id']);
-        if (!taskExists) {
-          await TopPrioritiesService.savePriorityEntry(_selectedDate, task);
+        task['id'] = const Uuid().v4();
+      }
+
+      // Save all tasks to top_priorities_entries table
+      await TopPrioritiesService.savePriorityEntries(_selectedDate, _tasks);
+
+      // Get the card ID (it should be available now)
+      String? cardId = widget.cardId;
+      if (cardId == null) {
+        // Check if a card already exists for this date
+        final existingCardId = await _findExistingCardForDate();
+
+        if (existingCardId != null) {
+          cardId = existingCardId;
+        } else {
+          // Create a new card
+          final dateKey = TopPrioritiesModel.dateToKey(_selectedDate);
+          final tempCard = await CardService.createCard({
+            'title': 'Daily Top Priorities',
+            'description': 'Top priorities for ${DateFormat('MMMM d, yyyy').format(_selectedDate)}',
+            'color': '0xFF6C5CE7', // Purple color
+            'tags': ['Daily', 'Priorities'],
+            'metadata': {
+              'type': 'top_priorities',
+              'version': '1.0',
+              'priorities': {
+                dateKey: {
+                  'lastModified': DateTime.now().toIso8601String(),
+                  'tasks': _tasks,
+                }
+              }
+            },
+            'tasks': [], // No tasks in the card itself
+          });
+
+          cardId = tempCard.id;
         }
       }
 
+      // Make sure the task is saved in top_priorities_entries
+      await TopPrioritiesService.savePriorityEntry(_selectedDate, task);
+
+      final user = AuthService.currentUser;
+      if (user == null) throw Exception('User not authenticated');
+
       final record = AudioRecorderService.instance;
-      
+
       if (await record.hasPermission()) {
         // Get temp directory for saving recording
         final tempDir = await getTemporaryDirectory();
         final tempPath = '${tempDir.path}/voice_note_${DateTime.now().millisecondsSinceEpoch}.m4a';
-        
+
         // Start recording
         await record.start(
           path: tempPath,
@@ -1423,7 +2086,7 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
           bitRate: 128000,
           samplingRate: 44100,
         );
-        
+
         // Show recording dialog
         if (!mounted) return;
         final shouldStop = await showDialog<bool>(
@@ -1451,11 +2114,11 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
             ),
           ),
         );
-        
+
         if (shouldStop == true) {
           // Stop recording
           final path = await record.stop();
-          
+
           if (path != null) {
             // Show uploading dialog
             if (!mounted) return;
@@ -1476,6 +2139,7 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
             );
 
             try {
+
               // Upload using AttachmentService
               final uploadResult = await AttachmentService.uploadAttachment(
                 filePath: path,
@@ -1493,14 +2157,17 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
 
               // Update UI
               setState(() {
-                if (task['documents'] == null) {
+                // Ensure documents is initialized as a list
+                if (task['documents'] == null || task['documents'] is! List) {
                   task['documents'] = [];
                 }
-                task['documents'].add({
+
+                // Add the voice note
+                (task['documents'] as List).add({
                   'id': uploadResult['id'],
                   'url': uploadResult['url'],
                   'wasabi_path': uploadResult['wasabi_path'],
-                  'mime_type': uploadResult['mime_type'],
+                  'mimeType': uploadResult['mime_type'],
                   'name': 'Voice Note ${DateTime.now().toString()}',
                   'todo_entry_id': task['id'],
                 });
@@ -1513,7 +2180,7 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
               // Close uploading dialog
               if (!mounted) return;
               Navigator.pop(context);
-              
+
               // Show error
               if (!mounted) return;
               ScaffoldMessenger.of(context).showSnackBar(
@@ -1536,4 +2203,4 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
       );
     }
   }
-} 
+}

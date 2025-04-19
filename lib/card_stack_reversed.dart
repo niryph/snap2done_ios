@@ -141,7 +141,21 @@ class _CardStackReversedState extends State<CardStackReversed> {
   @override
   void initState() {
     super.initState();
+    _initDynamicLinks();
     _loadCards();
+    
+    // Listen for focus changes to reload data when returning to this screen
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        final focusScopeNode = FocusScope.of(context);
+        focusScopeNode.addListener(() {
+          if (focusScopeNode.hasFocus && mounted) {
+            print("Screen regained focus, refreshing cards...");
+    _loadCards();
+          }
+        });
+      }
+    });
   }
   
   @override
@@ -168,6 +182,14 @@ class _CardStackReversedState extends State<CardStackReversed> {
       // Debug: Print all card types
       for (var card in loadedCards) {
         print("Card ID: ${card.id}, Type: ${card.metadata?['type'] ?? 'unknown'}, Title: ${card.title}");
+        // Detailed debug for top priorities cards
+        if (card.metadata?['type'] == 'top_priorities') {
+          print("FOUND TOP PRIORITIES CARD: ${card.id}");
+          print("METADATA: ${card.metadata}");
+          print("IS_ARCHIVED: ${card.isArchived}");
+          print("IS_FAVORITED: ${card.isFavorited}");
+          print("TAGS: ${card.tags}");
+        }
       }
       
       // Extract all unique tags
@@ -262,14 +284,32 @@ class _CardStackReversedState extends State<CardStackReversed> {
   List<CardModel> get filteredCards {
     List<CardModel> filtered;
     
+    // Get all special cards first (they should always be shown)
+    final specialCards = cards.where((card) => 
+      card.metadata != null && 
+      card.metadata!['type'] != null && 
+      ['top_priorities', 'water_intake', 'expense_tracker', 'calorie_tracker', 'mood_gratitude'].contains(card.metadata!['type'])
+    ).toList();
+    
+    // Get regular cards filtered by tag
+    List<CardModel> regularFilteredCards;
+    final regularCards = cards.where((card) => 
+      card.metadata == null || 
+      card.metadata!['type'] == null || 
+      !['top_priorities', 'water_intake', 'expense_tracker', 'calorie_tracker', 'mood_gratitude'].contains(card.metadata!['type'])
+    ).toList();
+    
     // First filter by tags
     if (selectedTags.contains('All')) {
-      filtered = List.from(cards);
+      regularFilteredCards = List.from(regularCards);
     } else {
-      filtered = cards.where((card) {
+      regularFilteredCards = regularCards.where((card) {
         return card.tags.any((tag) => selectedTags.contains(tag));
       }).toList();
     }
+    
+    // Combine special and regular filtered cards
+    filtered = [...specialCards, ...regularFilteredCards];
     
     // Then filter by search text if provided
     if (_searchText.isNotEmpty) {
@@ -831,130 +871,8 @@ class _CardStackReversedState extends State<CardStackReversed> {
 
   // Refresh cards from database
   Future<void> _refreshCards() async {
-    print("_refreshCards called");
-    
-    if (mounted) {
-      setState(() {
-        isLoading = true;
-      });
-    }
-    
-    try {
-      // Check if user is authenticated
-      final currentUser = Supabase.instance.client.auth.currentUser;
-      print("Current user during refresh: ${currentUser?.id ?? 'Not authenticated'}");
-      
-      if (currentUser == null) {
-        print("WARNING: User not authenticated during refresh. This may cause issues.");
-      }
-      
-      // Get cards from database
-      print("Fetching cards from database...");
-      final loadedCards = await CardService.getCards();
-      print("Loaded ${loadedCards.length} cards from database");
-      
-      // Debug: Print all card types
-      for (var card in loadedCards) {
-        print("Card ID: ${card.id}, Type: ${card.metadata?['type'] ?? 'unknown'}, Title: ${card.title}");
-      }
-      
-      // Extract all unique tags
-      final Set<String> uniqueTagsSet = {'All'};
-      for (var card in loadedCards) {
-        if (card.tags != null) {
-          uniqueTagsSet.addAll(card.tags!);
-        }
-      }
-      
-      // Check for expense tracker cards
-      final expenseTrackerCards = loadedCards.where((card) => 
-        card.metadata != null && card.metadata!['type'] == 'expense_tracker').toList();
-      print("Found ${expenseTrackerCards.length} expense tracker cards");
-      if (expenseTrackerCards.isNotEmpty) {
-        print("Expense tracker card IDs: ${expenseTrackerCards.map((c) => c.id).join(', ')}");
-      }
-      
-      // Check for water intake cards
-      final waterIntakeCards = loadedCards.where((card) => 
-        card.metadata != null && card.metadata!['type'] == 'water_intake').toList();
-      print("Found ${waterIntakeCards.length} water intake cards");
-      if (waterIntakeCards.isNotEmpty) {
-        print("Water intake card IDs: ${waterIntakeCards.map((c) => c.id).join(', ')}");
-      }
-      
-      // Check for top priorities cards
-      final topPrioritiesCards = loadedCards.where((card) => 
-        card.metadata != null && card.metadata!['type'] == 'top_priorities').toList();
-      print("Found ${topPrioritiesCards.length} top priorities cards");
-      if (topPrioritiesCards.isNotEmpty) {
-        print("Top priorities card IDs: ${topPrioritiesCards.map((c) => c.id).join(', ')}");
-      }
-      
-      // Check for calorie tracker cards
-      final calorieTrackerCards = loadedCards.where((card) => 
-        card.metadata != null && card.metadata!['type'] == 'calorie_tracker').toList();
-      print("Found ${calorieTrackerCards.length} calorie tracker cards");
-      if (calorieTrackerCards.isNotEmpty) {
-        print("Calorie tracker card IDs: ${calorieTrackerCards.map((c) => c.id).join(', ')}");
-      }
-      
-      // Check for regular todo cards
-      final regularCards = loadedCards.where((card) => 
-        card.metadata == null || card.metadata!['type'] == null).toList();
-      print("Found ${regularCards.length} regular todo cards");
-      if (regularCards.isNotEmpty) {
-        print("Regular card IDs: ${regularCards.map((c) => c.id).join(', ')}");
-      }
-      
-      if (mounted) {
-        setState(() {
-          print("Updating state with ${loadedCards.length} cards");
-          cards = loadedCards;
-          uniqueTags = uniqueTagsSet;
-          isLoading = false;
-          
-          // Sort cards to ensure special cards are at the top
-          // and regular cards are at the bottom (with newest regular cards at the top of the regular cards section)
-          cards.sort((a, b) {
-            // Special cards come before regular cards
-            final aIsSpecial = a.metadata != null && a.metadata!['type'] != null;
-            final bIsSpecial = b.metadata != null && b.metadata!['type'] != null;
-            
-            if (aIsSpecial && !bIsSpecial) return -1;
-            if (!aIsSpecial && bIsSpecial) return 1;
-            
-            // If both are special or both are regular, sort by date (newest first)
-            return b.createdAt.compareTo(a.createdAt);
-          });
-          
-          // Clear all expanded cards first
-          // expandedCards.clear();
-          
-          // Don't auto-expand any regular cards when refreshing
-          // Removed the code that auto-expands the most recent regular card
-        });
-        
-        // Force a rebuild after a short delay to ensure UI updates
-        Future.delayed(Duration(milliseconds: 100), () {
-          if (mounted) {
-            setState(() {
-              print("Forcing UI update after refresh");
-            });
-          }
-        });
-      }
-    } catch (e) {
-      print("Error loading cards: $e");
-      if (mounted) {
-        setState(() {
-          isLoading = false;
-        });
-        
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error loading cards: $e')),
-        );
-      }
-    }
+    print("Manual refresh triggered");
+    await _loadCards();
   }
 
   // Force a complete UI refresh
@@ -2325,14 +2243,18 @@ class _CardStackReversedState extends State<CardStackReversed> {
     } else if (card.metadata?['type'] == 'top_priorities') {
       try {
         final prioritiesData = card.metadata?['priorities'];
-        List<dynamic> priorities = [];
+        List<dynamic> allTasks = [];
         if (prioritiesData is Map) {
-          priorities = prioritiesData.values.toList();
+          for (var entry in prioritiesData.values) {
+            if (entry is Map && entry['tasks'] is List) {
+              allTasks.addAll(entry['tasks']);
+            }
+          }
         } else if (prioritiesData is List) {
-          priorities = prioritiesData;
+          allTasks = prioritiesData;
         }
-        final completedCount = priorities.where((p) => p is Map && p['isCompleted'] == true).length;
-        return 'Completed priorities: $completedCount / ${priorities.length}';
+        final completedCount = allTasks.where((t) => t is Map && t['isCompleted'] == true).length;
+        return 'Completed priorities: $completedCount / ${allTasks.length}';
       } catch (e) {
         print('Error processing top priorities: $e');
         return 'Priorities: 0 / 0';
@@ -2394,5 +2316,11 @@ class _CardStackReversedState extends State<CardStackReversed> {
         );
       }
     }
+  }
+
+  // Initialize Firebase Dynamic Links (stub for now)
+  void _initDynamicLinks() {
+    print("Dynamic links initialized");
+    // This is a stub for future implementation
   }
 }

@@ -43,7 +43,7 @@ class PrioritiesReminderService {
     // Schedule the notification
     await _notificationService.scheduleTaskReminder(
       taskId: 'top_priorities_$cardId',
-      title: 'Daily Top 3 Priorities',
+      title: 'Daily Top Priorities',
       body: 'Set your top priorities for today',
       scheduledDate: scheduledDate,
     );

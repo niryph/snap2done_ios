@@ -57,6 +57,10 @@ class _RecommendedCardsState extends State<RecommendedCards> {
         final existingCard = existingTopPriorityCards.first;
         if (!mounted) return;
         
+        // First, notify the main screen about the selected card
+        widget.onCardSelected(existingCard);
+        
+        // Then navigate to the edit page
         Navigator.push(
           context,
           MaterialPageRoute(
@@ -66,6 +70,8 @@ class _RecommendedCardsState extends State<RecommendedCards> {
               isEditing: true,
               onSave: (updatedMetadata) async {
                 await CardService.updateCardMetadata(existingCard.id, updatedMetadata);
+                // Force a refresh of all cards to ensure UI updates
+                await CardService.getCards();
                 return existingCard.id;
               },
             ),
@@ -102,11 +108,26 @@ class _RecommendedCardsState extends State<RecommendedCards> {
                   'color': '0xFFE53935',
                   'tags': ['Productivity'],
                   'user_id': userId,
+                  'is_archived': false,
+                  'is_favorited': false,
                   'created_at': DateTime.now().toIso8601String(),
                   'updated_at': DateTime.now().toIso8601String(),
                 };
                 
-                final newCard = await CardService.createCard(cardData);
+                print("DEBUG: Creating top priorities card with data: $cardData");
+                print("DEBUG: Metadata structure: ${metadata['priorities']?.keys ?? 'No priorities found'}");
+                
+                // Ensure we set notifyListeners to true for the card creation
+                final newCard = await CardService.createCard(cardData, notifyListeners: true);
+                print("DEBUG: Top priorities card created with ID: ${newCard.id}");
+                print("DEBUG: Metadata in created card: ${newCard.metadata}");
+                
+                // Force reload all cards to ensure the UI updates
+                await CardService.getCards();
+                
+                // Notify the main page about the new card
+                widget.onCardSelected(newCard);
+                
                 return newCard.id;
               } catch (e) {
                 print('Error creating top priorities card: $e');
