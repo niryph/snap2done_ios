@@ -485,7 +485,7 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
                                 SizedBox(height: 16),
 
                                 // Progress gauge - only show in editing mode
-                                if (widget.isEditing) ...[
+                                if (widget.isEditing && !_isLoading) ...[
                                   Card(
                                     elevation: 2,
                                     shape: RoundedRectangleBorder(
@@ -508,7 +508,7 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
                                                 ),
                                               ),
                                               Text(
-                                                '${_getCompletedTasksCount()}/${_tasks.length}',
+                                                '${_tasks.where((task) => task['isCompleted'] == true).length}/${_tasks.length}',
                                                 style: TextStyle(
                                                   fontSize: 16,
                                                   fontWeight: FontWeight.bold,
@@ -519,7 +519,7 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
                                           ),
                                           SizedBox(height: 8),
                                           LinearProgressIndicator(
-                                            value: _getCompletionPercentage(),
+                                            value: _tasks.isEmpty ? 0.0 : _tasks.where((task) => task['isCompleted'] == true).length / _tasks.length,
                                             backgroundColor: Colors.grey.withOpacity(0.3),
                                             valueColor: AlwaysStoppedAnimation<Color>(
                                               Theme.of(context).primaryColor,
@@ -528,13 +528,40 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
                                             borderRadius: BorderRadius.circular(5),
                                           ),
                                           SizedBox(height: 8),
-                                          Text(
-                                            _getCompletionMessage(),
-                                            style: TextStyle(
-                                              fontSize: 14,
-                                              color: Colors.grey[600],
-                                              fontStyle: FontStyle.italic,
-                                            ),
+                                          Builder(
+                                            builder: (context) {
+                                              final completedCount = _tasks.where((task) => task['isCompleted'] == true).length;
+                                              final totalCount = _tasks.length;
+                                              String message;
+                                              
+                                              if (completedCount == 0) {
+                                                message = 'No tasks completed yet. You can do it!';
+                                              } else if (completedCount == totalCount) {
+                                                message = 'All tasks completed! Great job!';
+                                              } else {
+                                                final remainingCount = totalCount - completedCount;
+                                                final percentage = (completedCount / totalCount * 100).round();
+                                                
+                                                if (percentage < 25) {
+                                                  message = 'Just getting started! $remainingCount more to go.';
+                                                } else if (percentage < 50) {
+                                                  message = 'Good progress! $remainingCount more remaining.';
+                                                } else if (percentage < 75) {
+                                                  message = 'More than halfway there! Keep going!';
+                                                } else {
+                                                  message = 'Almost done! Just $remainingCount more to complete.';
+                                                }
+                                              }
+                                              
+                                              return Text(
+                                                message,
+                                                style: TextStyle(
+                                                  fontSize: 14,
+                                                  color: Colors.grey[600],
+                                                  fontStyle: FontStyle.italic,
+                                                ),
+                                              );
+                                            },
                                           ),
                                         ],
                                       ),
@@ -617,35 +644,13 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
                                                     borderRadius: BorderRadius.circular(4),
                                                   ),
                                                   onChanged: (value) async {
+                                                    // Update UI immediately without showing loading indicator
                                                     setState(() {
                                                       task['isCompleted'] = value;
-                                                      _isLoading = true; // Show loading indicator
                                                     });
 
-                                                    try {
-                                                      // Save changes to database immediately
-                                                      await _saveTaskCompletionStatus(task);
-                                                    } catch (e) {
-                                                      print('Error saving task completion status: $e');
-                                                      // Revert the change if there was an error
-                                                      if (mounted) {
-                                                        setState(() {
-                                                          task['isCompleted'] = !value!;
-                                                          ScaffoldMessenger.of(context).showSnackBar(
-                                                            SnackBar(
-                                                              content: Text('Error updating task: $e'),
-                                                              backgroundColor: Colors.red,
-                                                            ),
-                                                          );
-                                                        });
-                                                      }
-                                                    } finally {
-                                                      if (mounted) {
-                                                        setState(() {
-                                                          _isLoading = false; // Hide loading indicator
-                                                        });
-                                                      }
-                                                    }
+                                                    // Save in background without blocking UI
+                                                    _saveTaskCompletionInBackground(task, value);
                                                   },
                                                 ) : Container(
                                                   width: 24,
@@ -2295,4 +2300,43 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
       }
     }
   }
+
+  // Save task completion status in background without blocking UI
+  void _saveTaskCompletionInBackground(Map<String, dynamic> task, bool? newValue) {
+    Future.microtask(() async {
+      try {
+        // Update task descriptions from text controllers
+        _updateTasksFromControllers();
+        
+        // Save to database
+        await TopPrioritiesService.savePriorityEntries(
+          _selectedDate, 
+          _tasks,
+        );
+        
+        print('Task completion status saved successfully: ${task['id']}, isCompleted: ${newValue}');
+      } catch (e) {
+        print('Error saving task completion status: $e');
+        
+        // Only update UI if widget is still mounted and there was an error
+        if (mounted) {
+          setState(() {
+            // Revert the change
+            task['isCompleted'] = !newValue!;
+            
+            // Show error message
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('Error updating task: $e'),
+                backgroundColor: Colors.red,
+                duration: Duration(seconds: 2),
+              ),
+            );
+          });
+        }
+      }
+    });
+  }
+
+  // Select a reminder time for a task
 }
