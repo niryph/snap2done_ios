@@ -484,6 +484,65 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
                                 ),
                                 SizedBox(height: 16),
 
+                                // Progress gauge - only show in editing mode
+                                if (widget.isEditing) ...[
+                                  Card(
+                                    elevation: 2,
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(12),
+                                    ),
+                                    color: themeProvider.isDarkMode ? Colors.grey[900]?.withOpacity(0.7) : Colors.white.withOpacity(0.7),
+                                    child: Padding(
+                                      padding: EdgeInsets.all(16),
+                                      child: Column(
+                                        crossAxisAlignment: CrossAxisAlignment.start,
+                                        children: [
+                                          Row(
+                                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                            children: [
+                                              Text(
+                                                'Progress',
+                                                style: TextStyle(
+                                                  fontSize: 16,
+                                                  fontWeight: FontWeight.bold,
+                                                ),
+                                              ),
+                                              Text(
+                                                '${_getCompletedTasksCount()}/${_tasks.length}',
+                                                style: TextStyle(
+                                                  fontSize: 16,
+                                                  fontWeight: FontWeight.bold,
+                                                  color: Theme.of(context).primaryColor,
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                          SizedBox(height: 8),
+                                          LinearProgressIndicator(
+                                            value: _getCompletionPercentage(),
+                                            backgroundColor: Colors.grey.withOpacity(0.3),
+                                            valueColor: AlwaysStoppedAnimation<Color>(
+                                              Theme.of(context).primaryColor,
+                                            ),
+                                            minHeight: 10,
+                                            borderRadius: BorderRadius.circular(5),
+                                          ),
+                                          SizedBox(height: 8),
+                                          Text(
+                                            _getCompletionMessage(),
+                                            style: TextStyle(
+                                              fontSize: 14,
+                                              color: Colors.grey[600],
+                                              fontStyle: FontStyle.italic,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                  SizedBox(height: 16),
+                                ],
+
                                 // Tasks list
                                 ReorderableListView.builder(
                                   buildDefaultDragHandles: false,
@@ -2201,6 +2260,39 @@ class _TopPrioritiesPageState extends State<TopPrioritiesPage> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Error recording voice note: $e')),
       );
+    }
+  }
+
+  int _getCompletedTasksCount() {
+    return _tasks.where((task) => task['isCompleted'] == true).length;
+  }
+
+  double _getCompletionPercentage() {
+    if (_tasks.isEmpty) return 0.0;
+    return _getCompletedTasksCount() / _tasks.length;
+  }
+
+  String _getCompletionMessage() {
+    final completedCount = _getCompletedTasksCount();
+    final totalCount = _tasks.length;
+
+    if (completedCount == 0) {
+      return 'No tasks completed yet. You can do it!';
+    } else if (completedCount == totalCount) {
+      return 'All tasks completed! Great job!';
+    } else {
+      final remainingCount = totalCount - completedCount;
+      final percentage = (completedCount / totalCount * 100).round();
+      
+      if (percentage < 25) {
+        return 'Just getting started! $remainingCount more to go.';
+      } else if (percentage < 50) {
+        return 'Good progress! $remainingCount more remaining.';
+      } else if (percentage < 75) {
+        return 'More than halfway there! Keep going!';
+      } else {
+        return 'Almost done! Just $remainingCount more to complete.';
+      }
     }
   }
 }
